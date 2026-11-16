@@ -4,6 +4,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 
 const MODEL = 'qwen3.5:0.8b';
+const PREFERRED_CODING_MODELS = ['qwen2.5-coder:1.5b', 'qwen2.5-coder:0.5b', 'qwen3.5:0.8b', 'qwen3:0.6b'];
 const ENDPOINT = 'http://127.0.0.1:11434/api/chat';
 const CONTEXT_RADIUS = 4;
 const MAX_CONTEXT_CHARS = 3000;
@@ -47,7 +48,7 @@ async function getSourceContext(root, file, line, radius = CONTEXT_RADIUS) {
   return { context: context.slice(0, MAX_CONTEXT_CHARS), lines: snippetLines, totalLines: lines.length };
 }
 
-function parseVerdict(content) {
+function parseVerdict(content, model = MODEL) {
   const text = String(content || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
   const data = JSON.parse(text);
   const allowed = new Set(['likely_real', 'likely_false_positive', 'uncertain']);
@@ -63,7 +64,7 @@ function parseVerdict(content) {
     rationale,
     evidence: asText(data.evidence).trim().slice(0, 500),
     reviewAdvice: asText(data.reviewAdvice).trim().slice(0, 400),
-    model: MODEL,
+    model,
     reviewedAt: new Date().toISOString(),
   };
 }
@@ -115,11 +116,17 @@ async function verifyFinding(root, finding, options = {}) {
     throw new Error(`Ollama returned HTTP ${response.status}: ${body.slice(0, 240)}`);
   }
   const result = await response.json();
-  return parseVerdict(result.message?.content);
+  return parseVerdict(result.message?.content, model);
 }
 
 async function reviewFindings(root, findings, options = {}) {
   const results = { reviewed: 0, failed: 0 };
+  let resolvedModel = options.model;
+  if (!resolvedModel && !options.fetch) {
+    const health = await checkAiHealth(options);
+    if (health.available && health.recommendedModel) resolvedModel = health.recommendedModel;
+  }
+  const runOptions = resolvedModel ? { ...options, model: resolvedModel } : options;
   let fatalError = null;
   for (let index = 0; index < findings.length; index++) {
     const finding = findings[index];
@@ -132,7 +139,7 @@ async function reviewFindings(root, findings, options = {}) {
       continue;
     }
     try {
-      finding.aiAssessment = await verifyFinding(root, finding, options);
+      finding.aiAssessment = await verifyFinding(root, finding, runOptions);
       delete finding.aiReviewError;
       results.reviewed++;
     } catch (error) {
@@ -163,6 +170,7 @@ async function checkAiHealth(options = {}) {
         available: false,
         modelInstalled: false,
         model,
+        recommendedModel: model,
         endpoint: ENDPOINT,
         models: [],
         message: `Ollama returned HTTP ${response.status}.`,
@@ -170,27 +178,31 @@ async function checkAiHealth(options = {}) {
     }
     const data = await response.json();
     const models = Array.isArray(data?.models) ? data.models.map((item) => String(item.name || item.model || '')).filter(Boolean) : [];
-    const modelInstalled = models.some((name) => name === model || name.startsWith(`${model}:`));
+    const preferred = PREFERRED_CODING_MODELS.find((candidate) => models.some((m) => m === candidate || m.startsWith(`${candidate}:`)));
+    const activeModel = preferred || models[0] || model;
+    const modelInstalled = models.length > 0 && (Boolean(preferred) || models.some((name) => name === model || name.startsWith(`${model}:`)));
     return {
       available: true,
       modelInstalled,
-      model,
+      model: activeModel,
+      recommendedModel: activeModel,
       endpoint: ENDPOINT,
       models,
       message: modelInstalled
-        ? `Local Ollama online · ${model} ready`
-        : `Ollama is running, but ${model} is not installed. Run: ollama pull ${model}`,
+        ? `Local Ollama online · ${activeModel} ready (tip: "ollama pull qwen2.5-coder:0.5b" for fastest low-RAM CPU review)`
+        : `Ollama is running. For fastest low-end PC code review run: ollama pull qwen2.5-coder:0.5b`,
     };
   } catch {
     return {
       available: false,
       modelInstalled: false,
       model,
+      recommendedModel: model,
       endpoint: ENDPOINT,
       models: [],
-      message: `Cannot reach Ollama at ${ENDPOINT}. Start Ollama and run: ollama pull ${model}`,
+      message: `Cannot reach Ollama at ${ENDPOINT}. Start Ollama and run: ollama pull qwen2.5-coder:0.5b`,
     };
   }
 }
 
-module.exports = { MODEL, ENDPOINT, getSourceContext, parseVerdict, verifyFinding, reviewFindings, checkAiHealth };
+module.exports = { MODEL, PREFERRED_CODING_MODELS, ENDPOINT, getSourceContext, parseVerdict, verifyFinding, reviewFindings, checkAiHealth };
