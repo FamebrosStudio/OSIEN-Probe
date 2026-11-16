@@ -10,6 +10,7 @@ const ipc = typeof ipcMain?.handle === 'function' ? ipcMain.handle.bind(ipcMain)
 const { scanProjectRoot, toSarifReport, toMarkdownReport, kinds } = require('./scanner.cjs');
 const { shared, categoryRules } = require('./rules.cjs');
 const { verifyFinding, reviewFindings, getSourceContext, checkAiHealth, generateFindingFix, applyFindingFix, PREFERRED_CODING_MODELS, CODEX_MODELS, MODEL } = require('./ai-review.cjs');
+const { getCodexAuthStatus, connectCodexBrowser, disconnectCodex } = require('./codex-auth.cjs');
 const { getSystemProfile, runExtremeTest, stopExtremeTest } = require('./extreme-tester.cjs');
 const isInside = (root, target) => { const rel = path.relative(root, target); return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel)); };
 const statePath = () => path.join(app.getPath('userData'), 'deepcheck-projects.json');
@@ -30,10 +31,12 @@ async function saveAiConfig(cfg) {
   await fs.mkdir(path.dirname(aiConfigPath()), { recursive: true });
   await fs.writeFile(aiConfigPath(), JSON.stringify(cfg, null, 2), 'utf8');
 }
-function publicAiConfig(cfg) {
+async function publicAiConfig(cfg) {
+  const codexAuth = await getCodexAuthStatus();
   return {
     provider: cfg.provider,
     model: cfg.model,
+    codexConnected: codexAuth.connected,
     hasApiKey: Boolean(cfg.apiKey),
     apiKeyMasked: cfg.apiKey ? `${cfg.apiKey.slice(0, 5)}…${cfg.apiKey.slice(-4)}` : '',
     localModels: PREFERRED_CODING_MODELS,
@@ -221,6 +224,18 @@ ipc('check-ai-status', async () => {
   return checkAiHealth({ provider: aiCfg.provider, model: aiCfg.model, apiKey: aiCfg.apiKey });
 });
 ipc('get-ai-config', async () => publicAiConfig(await readAiConfig()));
+ipc('connect-codex', async () => {
+  await connectCodexBrowser();
+  const current = await readAiConfig();
+  const next = { provider: 'cloud-codex', model: CODEX_MODELS.includes(current.model) ? current.model : CODEX_MODELS[0], apiKey: current.apiKey };
+  await saveAiConfig(next);
+  return { config: await publicAiConfig(next), health: await checkAiHealth(next) };
+});
+ipc('disconnect-codex', async () => {
+  await disconnectCodex();
+  const current = await readAiConfig();
+  return { config: await publicAiConfig(current), health: await checkAiHealth(current) };
+});
 ipc('save-ai-config', async (_event, payload) => {
   const current = await readAiConfig();
   const provider = payload?.provider === 'cloud-codex' ? 'cloud-codex' : 'local';
@@ -230,7 +245,7 @@ ipc('save-ai-config', async (_event, payload) => {
     : (payload?.clearApiKey ? '' : current.apiKey);
   const next = { provider, model, apiKey: nextKey };
   await saveAiConfig(next);
-  return { config: publicAiConfig(next), health: await checkAiHealth(next) };
+  return { config: await publicAiConfig(next), health: await checkAiHealth(next) };
 });
 ipc('generate-finding-fix', async (_event, payload) => {
   const { projectId, findingId } = payload || {};

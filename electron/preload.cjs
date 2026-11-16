@@ -14,6 +14,8 @@ contextBridge.exposeInMainWorld('deepcheck', {
   checkAiStatus: () => ipcRenderer.invoke('check-ai-status'),
   getAiConfig: () => ipcRenderer.invoke('get-ai-config'),
   saveAiConfig: (payload) => ipcRenderer.invoke('save-ai-config', payload),
+  connectCodex: () => ipcRenderer.invoke('connect-codex'),
+  disconnectCodex: () => ipcRenderer.invoke('disconnect-codex'),
   generateFindingFix: (payload) => ipcRenderer.invoke('generate-finding-fix', payload),
   applyFindingFix: (payload) => ipcRenderer.invoke('apply-finding-fix', payload),
   listRules: () => ipcRenderer.invoke('list-rules'),

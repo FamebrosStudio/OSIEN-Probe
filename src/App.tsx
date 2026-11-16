@@ -7,7 +7,7 @@ import './UIOverrides.css'
 type Kind = 'Website' | 'Software' | 'API / backend' | 'Mobile app' | 'Library' | 'Data / ML'
 type AiAssessment = { verdict: 'likely_real' | 'likely_false_positive' | 'uncertain'; confidence: number; rationale: string; evidence: string; reviewAdvice: string; model: string; reviewedAt: string }
 type Finding = { id: string; title: string; severity: string; file: string; line: number; excerpt: string; ruleId?: string; cwe?: string; hint?: string; confidence?: string; reason?: string; isNew?: boolean; fixed?: boolean; aiAssessment?: AiAssessment; aiReviewError?: string }
-type AiConfig = { provider: 'local' | 'cloud-codex'; model: string; hasApiKey: boolean; apiKeyMasked: string; localModels: string[]; codexModels: string[] }
+type AiConfig = { provider: 'local' | 'cloud-codex'; model: string; codexConnected?: boolean; hasApiKey: boolean; apiKeyMasked: string; localModels: string[]; codexModels: string[] }
 type FindingFixPreview = { projectId: string; findingId: string; file: string; explanation: string; target: string; replacement: string; model: string }
 type TestTarget = { file: string; runner: 'node' | 'npm' | 'pytest' | 'go' | 'cargo'; names?: string[]; command: string }
 type SeverityCounts = { critical: number; high: number; medium: number; low: number; info: number }
@@ -61,6 +61,8 @@ type Bridge = {
   checkAiStatus?(): Promise<AiHealth>
   getAiConfig?(): Promise<AiConfig>
   saveAiConfig?(p: { provider: 'local' | 'cloud-codex'; model: string; apiKey?: string; clearApiKey?: boolean }): Promise<{ config: AiConfig; health: AiHealth }>
+  connectCodex?(): Promise<{ config: AiConfig; health: AiHealth }>
+  disconnectCodex?(): Promise<{ config: AiConfig; health: AiHealth }>
   generateFindingFix?(p: { projectId: string; findingId: string }): Promise<{ explanation: string; target: string; replacement: string; file: string; model: string }>
   applyFindingFix?(p: { projectId: string; findingId: string; file: string; target: string; replacement: string }): Promise<{ applied: boolean; file: string }>
   listRules?(): Promise<CatalogPayload>
@@ -311,6 +313,35 @@ function App() {
       setAiConfig(res.config)
       setAiHealth(res.health)
       if (newKey) setApiKeyInput('')
+    } catch (e) {
+      setMessage(errorText(e))
+    } finally {
+      setBusy('')
+    }
+  }
+  const connectCodexAccount = async () => {
+    if (!bridge?.connectCodex) return
+    setBusy('connect-codex')
+    setMessage('')
+    try {
+      const res = await bridge.connectCodex()
+      setAiConfig(res.config)
+      setAiHealth(res.health)
+      setMessage('ChatGPT account connected via Codex! "Fix finding" is now unlocked.')
+    } catch (e) {
+      setMessage(errorText(e))
+    } finally {
+      setBusy('')
+    }
+  }
+  const disconnectCodexAccount = async () => {
+    if (!bridge?.disconnectCodex) return
+    setBusy('connect-codex')
+    setMessage('')
+    try {
+      const res = await bridge.disconnectCodex()
+      setAiConfig(res.config)
+      setAiHealth(res.health)
     } catch (e) {
       setMessage(errorText(e))
     } finally {
@@ -699,37 +730,60 @@ function App() {
                   </select>
                 </label>
                 {aiConfig.provider === 'cloud-codex' && (
-                  <div className="codex-key-row">
-                    <label className="field-label">
-                      OpenAI API Key {aiConfig.hasApiKey ? `(saved: ${aiConfig.apiKeyMasked})` : '(required for Cloud Codex)'}
-                      <input
-                        type="password"
-                        className="text-field"
-                        placeholder={aiConfig.hasApiKey ? 'Enter new key to replace…' : 'sk-...'}
-                        value={apiKeyInput}
-                        onChange={e => setApiKeyInput(e.target.value)}
-                      />
-                    </label>
-                    <div className="export-actions">
-                      <button
-                        type="button"
-                        className="primary"
-                        disabled={!apiKeyInput.trim() || busy === 'save-ai'}
-                        onClick={() => void saveAiSettings('cloud-codex', aiConfig.model, apiKeyInput)}
-                      >
-                        Save key
-                      </button>
-                      {aiConfig.hasApiKey && (
-                        <button
-                          type="button"
-                          className="filter-button"
-                          disabled={busy === 'save-ai'}
-                          onClick={() => void saveAiSettings('cloud-codex', aiConfig.model, undefined, true)}
-                        >
-                          Clear key
-                        </button>
-                      )}
+                  <div className="codex-auth-box">
+                    <div className="codex-oauth-row">
+                      <div>
+                        <strong>{aiConfig.codexConnected ? 'ChatGPT account connected ✓' : 'Sign in with your ChatGPT account'}</strong>
+                        <small>
+                          {aiConfig.codexConnected
+                            ? 'Using your ChatGPT subscription via Codex OAuth (~/.codex/auth.json) — no API key needed.'
+                            : 'Opens your browser to sign in with ChatGPT (Plus / Pro / Team) — no API key required.'}
+                        </small>
+                      </div>
+                      <div className="export-actions">
+                        {aiConfig.codexConnected ? (
+                          <button type="button" className="filter-button" disabled={busy === 'connect-codex'} onClick={() => void disconnectCodexAccount()}>
+                            Disconnect
+                          </button>
+                        ) : (
+                          <button type="button" className="primary" disabled={busy === 'connect-codex'} onClick={() => void connectCodexAccount()}>
+                            <ExternalLink size={14}/> {busy === 'connect-codex' ? 'Waiting for browser sign-in…' : 'Connect Codex (ChatGPT)'}
+                          </button>
+                        )}
+                      </div>
                     </div>
+                    <details className="codex-api-fallback">
+                      <summary>Advanced: Or use an OpenAI API key instead {aiConfig.hasApiKey ? `(saved: ${aiConfig.apiKeyMasked})` : ''}</summary>
+                      <div className="codex-key-row">
+                        <input
+                          type="password"
+                          className="text-field"
+                          placeholder={aiConfig.hasApiKey ? 'Enter new key to replace…' : 'sk-...'}
+                          value={apiKeyInput}
+                          onChange={e => setApiKeyInput(e.target.value)}
+                        />
+                        <div className="export-actions">
+                          <button
+                            type="button"
+                            className="filter-button"
+                            disabled={!apiKeyInput.trim() || busy === 'save-ai'}
+                            onClick={() => void saveAiSettings('cloud-codex', aiConfig.model, apiKeyInput)}
+                          >
+                            Save key
+                          </button>
+                          {aiConfig.hasApiKey && (
+                            <button
+                              type="button"
+                              className="filter-button"
+                              disabled={busy === 'save-ai'}
+                              onClick={() => void saveAiSettings('cloud-codex', aiConfig.model, undefined, true)}
+                            >
+                              Clear key
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </details>
                   </div>
                 )}
               </div>

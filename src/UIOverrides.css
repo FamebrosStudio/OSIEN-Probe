@@ -124,8 +124,14 @@
 .provider-tabs button.selected{background:#1b251a;border-color:#44613d;color:#d6eec1}
 .provider-fields{display:grid;gap:12px}
 .provider-fields select{width:100%;max-width:340px;height:36px;padding:0 10px}
-.codex-key-row{display:grid;gap:10px}
+.codex-key-row{display:grid;gap:10px;margin-top:8px}
 .codex-key-row input{max-width:460px}
+.codex-auth-box{display:grid;gap:10px;padding:12px;border-radius:7px;background:#0f1210;border:1px solid #273028}
+.codex-oauth-row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.codex-oauth-row strong{display:block;font-size:12px;color:#e3ece0}
+.codex-oauth-row small{display:block;font-size:11px;color:#8e968f;margin-top:2px}
+.codex-api-fallback{font-size:11px;color:#8e968f;border-top:1px solid #202521;padding-top:8px}
+.codex-api-fallback summary{cursor:pointer;color:#a8b2a9}
 .fix-finding-btn{border-color:#4b6f41;background:#192517;color:#c3e89f}
 .fix-finding-btn:hover{border-color:#74a85e;background:#20301d}
 .fixed-badge{padding:4px 10px;border-radius:999px;border:1px solid #44663b;background:#182416;color:#b8e18e;font:10px 'IBM Plex Mono',monospace}
