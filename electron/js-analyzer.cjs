@@ -577,6 +577,117 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       }, node, 'high', 'Errors thrown inside an async Promise executor are not caught by the Promise.');
     }
 
+    // Comma operator inside if/while/for/switch/return/index (e.g. arr[1, 2] or if (a, b)).
+    if (node.type === 'SequenceExpression' && parent && (
+      ['IfStatement', 'WhileStatement', 'ReturnStatement'].includes(parent.type)
+      || (parent.type === 'MemberExpression' && parentKey === 'property' && parent.computed)
+    )) {
+      emit({
+        id: 'js-comma-operator',
+        title: 'Suspicious comma operator expression',
+        severity: 'medium',
+        cwe: 'CWE-480',
+        hint: 'Avoid comma expressions here; only the last value is used.',
+      }, node, 'high', 'Comma operator evaluates and discards earlier expressions, keeping only the last.');
+    }
+
+    // Calling Map(), Set(), WeakMap(), WeakSet(), or Promise() without `new`.
+    if (node.type === 'CallExpression' && node.callee?.type === 'Identifier'
+      && ['Map', 'Set', 'WeakMap', 'WeakSet', 'Promise'].includes(node.callee.name)) {
+      emit({
+        id: 'js-missing-new',
+        title: `Missing "new" before ${node.callee.name}()`,
+        severity: 'high',
+        cwe: 'CWE-670',
+        hint: `Use "new ${node.callee.name}(...)" — calling it without new throws a TypeError at runtime.`,
+      }, node, 'high', `${node.callee.name}() requires "new" and throws TypeError when invoked as a function.`);
+    }
+
+    // String literal containing ${declaredVar} instead of backtick template literal.
+    if (node.type === 'StringLiteral' && /\$\{([A-Za-z_$][\w$]*)\}/.test(node.value)
+      && parent?.type !== 'ImportDeclaration' && parent?.type !== 'ExportNamedDeclaration') {
+      const m = node.value.match(/\$\{([A-Za-z_$][\w$]*)\}/);
+      if (m && scopeStack.some((s) => s.has(m[1]))) {
+        emit({
+          id: 'js-template-in-string',
+          title: 'Template interpolation ${...} inside regular quotes',
+          severity: 'medium',
+          cwe: 'CWE-670',
+          hint: `Use backticks (\`...\`) so \${${m[1]}} is interpolated instead of treated as literal text.`,
+        }, node, 'high', `String literal contains "\${${m[1]}}" matching in-scope variable "${m[1]}", but uses quotes instead of backticks.`);
+      }
+    }
+
+    // Loop counter moving in the wrong direction (< with --, or >/>= with ++ from > 0).
+    if (node.type === 'ForStatement' && node.test?.type === 'BinaryExpression' && node.update?.type === 'UpdateExpression') {
+      const testVar = node.test.left?.type === 'Identifier' ? node.test.left.name : '';
+      const updVar = node.update.argument?.type === 'Identifier' ? node.update.argument.name : '';
+      if (testVar && testVar === updVar) {
+        if ((node.test.operator === '<' || node.test.operator === '<=') && node.update.operator === '--') {
+          emit({
+            id: 'js-for-direction',
+            title: 'Loop counter moves in wrong direction',
+            severity: 'high',
+            cwe: 'CWE-835',
+            hint: `Loop checks "${testVar} ${node.test.operator} ..." while decrementing "${testVar}--", causing an infinite or skipped loop.`,
+          }, node.update, 'high', `Counter "${testVar}" decrements while upper bound uses "${node.test.operator}".`);
+        }
+      }
+    }
+
+    // Unparenthesized assignment in return statement: return x = y.
+    if (node.type === 'ReturnStatement' && node.argument?.type === 'AssignmentExpression' && !node.argument.extra?.parenthesized) {
+      emit({
+        id: 'js-assign-in-return',
+        title: 'Assignment inside return statement',
+        severity: 'low',
+        cwe: 'CWE-481',
+        hint: 'Did you mean "===" instead of "=", or assign on a separate line before returning?',
+      }, node.argument, 'medium', 'Return statement performs an unparenthesized assignment.');
+    }
+
+    // O(n^2) object spread inside Array.prototype.reduce.
+    if (node.type === 'CallExpression' && memberName(node.callee) === 'reduce' && node.arguments[0]) {
+      const cb = node.arguments[0];
+      const accName = cb.params?.[0]?.type === 'Identifier' ? cb.params[0].name : '';
+      if (accName) {
+        let spreadNode = null;
+        walkSubtree(cb.body, (sub) => {
+          if (sub.type === 'SpreadElement' && sub.argument?.type === 'Identifier' && sub.argument.name === accName) {
+            spreadNode = sub;
+          }
+        });
+        if (spreadNode) {
+          emit({
+            id: 'js-spread-in-reduce',
+            title: 'O(n²) accumulator spread inside .reduce()',
+            severity: 'low',
+            cwe: 'CWE-407',
+            hint: 'Mutate the fresh accumulator object directly inside .reduce() instead of cloning with ...acc on every iteration.',
+          }, spreadNode, 'medium', `Spreading accumulator "...${accName}" inside .reduce() allocates a new copy on every element.`);
+        }
+      }
+    }
+
+    // Duplicate module import in the same file.
+    if (node.type === 'Program' && Array.isArray(node.body)) {
+      const seenImports = new Set();
+      for (const stmt of node.body) {
+        if (stmt.type === 'ImportDeclaration' && stmt.source?.value) {
+          if (seenImports.has(stmt.source.value)) {
+            emit({
+              id: 'js-duplicate-import',
+              title: `Duplicate import "${stmt.source.value}"`,
+              severity: 'low',
+              cwe: 'CWE-710',
+              hint: 'Merge duplicate imports from the same module into a single import statement.',
+            }, stmt, 'high', `Module "${stmt.source.value}" is imported more than once.`);
+          }
+          seenImports.add(stmt.source.value);
+        }
+      }
+    }
+
     // Operator precedence bug: !x in obj or !x instanceof Class.
     if (node.type === 'BinaryExpression' && (node.operator === 'in' || node.operator === 'instanceof')
       && node.left?.type === 'UnaryExpression' && node.left.operator === '!' && !node.left.extra?.parenthesized) {

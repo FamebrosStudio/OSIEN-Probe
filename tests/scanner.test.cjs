@@ -560,6 +560,34 @@ test('allows Android MAIN/LAUNCHER exported activity while flagging non-launcher
   assert.equal(exported[0].line, 9);
 });
 
+test('detects comma operator, missing new, template in quotes, loop direction, duplicate import, and reduce spread', async () => {
+  const root = await fixture({
+    'enormous.mjs': [
+      'import a from "./a.js";',
+      'import b from "./a.js";',
+      'function run(arr, name, n) {',
+      '  const v = arr[1, 2];',
+      '  const m = Map();',
+      '  const msg = "Hello ${name}";',
+      '  for (let i = 0; i < n; i--) { break; }',
+      '  return arr.reduce((acc, x) => ({ ...acc, [x]: true }), {});',
+      '}',
+    ].join('\n'),
+  });
+  const result = await scanProjectRoot(root, 'Software');
+  const ruleIds = new Set(result.findings.map((f) => f.ruleId));
+  for (const expected of [
+    'js-duplicate-import',
+    'js-comma-operator',
+    'js-missing-new',
+    'js-template-in-string',
+    'js-for-direction',
+    'js-spread-in-reduce',
+  ]) {
+    assert.ok(ruleIds.has(expected), `expected ${expected} to be detected`);
+  }
+});
+
 test('scans the DeepCheck repo itself without crashing', async () => {
   const root = path.resolve(__dirname, '..');
   const result = await scanProjectRoot(root, 'Software');
