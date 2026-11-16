@@ -504,6 +504,40 @@ test('detects negated in/instanceof precedence, unawaited condition, throw liter
   }
 });
 
+test('detects ignored return values of immutable string and array methods', async () => {
+  const root = await fixture({
+    'immutable.js': [
+      "'use strict';",
+      'function clean(name, items) {',
+      '  name.trim();',
+      '  items.filter((x) => x > 0);',
+      '  return items;',
+      '}',
+    ].join('\n'),
+  });
+  const result = await scanProjectRoot(root, 'Software');
+  const ignored = result.findings.filter((f) => f.ruleId === 'js-ignored-immutable-return');
+  assert.equal(ignored.length, 2);
+});
+
+test('detects missing return in array callbacks and duplicate else-if branches', async () => {
+  const root = await fixture({
+    'callbacks.js': [
+      "'use strict';",
+      'function transform(items, x) {',
+      '  const mapped = items.map((n) => { n * 2; });',
+      '  if (x === 1) return mapped;',
+      '  else if (x === 1) return [];',
+      '  return mapped;',
+      '}',
+    ].join('\n'),
+  });
+  const result = await scanProjectRoot(root, 'Software');
+  const ruleIds = new Set(result.findings.map((f) => f.ruleId));
+  assert.ok(ruleIds.has('js-missing-array-return'));
+  assert.ok(ruleIds.has('js-duplicate-else-if'));
+});
+
 test('scans the DeepCheck repo itself without crashing', async () => {
   const root = path.resolve(__dirname, '..');
   const result = await scanProjectRoot(root, 'Software');

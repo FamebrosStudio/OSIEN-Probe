@@ -81,6 +81,25 @@ function App() {
   const [reviews, setReviews] = useState<Record<string, ReviewProgress>>({})
 
   useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setDialog(false)
+        setHelp(false)
+        setConfirmClear(false)
+        setWorkspaceOpen(false)
+        return
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        const input = document.querySelector<HTMLInputElement>('.search input')
+        input?.focus()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
+  useEffect(() => {
     if (!bridge?.onAiReviewProgress) return undefined
     const off = bridge.onAiReviewProgress(p => {
       setReviews(current => {
@@ -255,7 +274,7 @@ function App() {
 
   return <div className="app-shell">
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark"><ShieldCheck size={19}/></span><span>deepcheck</span></div>
+      <div className="brand"><span className="brand-mark"><ShieldCheck size={19}/></span><span>OSIEN DeepCheck</span></div>
       <div className="workspace-wrap">
         <button className="workspace" onClick={() => setWorkspaceOpen(v => !v)}>
           <div className="workspace-icon"><Folder size={15}/></div>
@@ -356,7 +375,7 @@ function App() {
                 <div className="checks-count">{p.latestRun ? p.latestRun.rulesEvaluated.toLocaleString() : '—'} <span>{p.latestRun ? 'checks' : ''}</span></div>
                 <div className="score-cell">
                   {p.latestRun ? <>
-                    <div className="score-ring"><span>{p.latestRun.score}</span></div>
+                    <div className={`score-ring ${p.latestRun.score >= 80 ? 'score-good' : p.latestRun.score >= 50 ? 'score-warn' : 'score-bad'}`}><span>{p.latestRun.score}</span></div>
                     <span className="score-label">{typeof delta === 'number' && delta !== 0 ? `${delta > 0 ? '+' : ''}${delta}` : 'Score'}</span>
                   </> : <span className="muted">—</span>}
                 </div>
@@ -423,7 +442,7 @@ function App() {
           </div>
         )}
       </section>
-      <footer><span>DeepCheck <span className="footer-sep">·</span> Windows desktop</span><span><span className="footer-status"/> Local analysis</span></footer>
+      <footer><span>OSIEN DeepCheck <span className="footer-sep">·</span> Local desktop app</span><span><span className="footer-status"/> Local analysis</span></footer>
     </main>
     {dialog && <div className="overlay" onMouseDown={e => { if (e.target === e.currentTarget && busy !== 'add') setDialog(false) }}>
       <section className="dialog">
@@ -568,6 +587,21 @@ function FindingList({
         <button className="filter-button copy-button" disabled={!filtered.length} onClick={() => void copy()}>{copied ? 'Copied' : 'Copy findings'}</button>
       </div>
     </div>
+    {findings.length > 0 && <div className="severity-strip">
+      {(['critical', 'high', 'medium', 'low', 'info'] as const).map(sev => {
+        const count = findings.filter(f => f.severity === sev).length
+        const active = severityFilter === sev
+        return <button
+          key={sev}
+          type="button"
+          className={`sev-pill severity-${sev} ${active ? 'sev-pill-active' : ''}`}
+          onClick={() => setSeverityFilter(active ? 'All severities' : sev)}
+        >
+          <span>{sev}</span>
+          <b>{count}</b>
+        </button>
+      })}
+    </div>}
     {findings.length > 0 && <div className="triage-bar">
       <label className="search triage-search">
         <Search size={14}/>
@@ -823,7 +857,7 @@ function InfoDialog({ onClose }: { onClose(): void }) {
   return <div className="overlay" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
     <section className="dialog">
       <div className="dialog-head">
-        <div><h2>About DeepCheck scans</h2><p>Local source checks, AI review, and project tests are separate steps</p></div>
+        <div><h2>About OSIEN DeepCheck scans</h2><p>Local source checks, AI review, and project tests are separate steps</p></div>
         <button className="icon-button" onClick={onClose}><X size={18}/></button>
       </div>
       <div className="help-copy">

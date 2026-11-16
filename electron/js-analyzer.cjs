@@ -627,15 +627,35 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       });
     }
 
-    // Constant condition in if statement.
-    if (node.type === 'IfStatement' && (node.test?.type === 'BooleanLiteral' || node.test?.type === 'NumericLiteral' || node.test?.type === 'StringLiteral')) {
-      emit({
-        id: 'js-constant-condition',
-        title: 'Constant condition in if statement',
-        severity: 'medium',
-        cwe: 'CWE-570',
-        hint: 'Replace the constant literal condition with a real runtime check or remove dead branch.',
-      }, node.test, 'high', 'if() condition is a constant literal that never changes at runtime.');
+    // Constant condition in if statement & duplicate else-if conditions.
+    if (node.type === 'IfStatement') {
+      if (node.test?.type === 'BooleanLiteral' || node.test?.type === 'NumericLiteral' || node.test?.type === 'StringLiteral') {
+        emit({
+          id: 'js-constant-condition',
+          title: 'Constant condition in if statement',
+          severity: 'medium',
+          cwe: 'CWE-570',
+          hint: 'Replace the constant literal condition with a real runtime check or remove dead branch.',
+        }, node.test, 'high', 'if() condition is a constant literal that never changes at runtime.');
+      }
+      if (parent?.type !== 'IfStatement') {
+        const seenBranches = new Set([raw.slice(node.test.start, node.test.end).trim()]);
+        let cur = node.alternate;
+        while (cur?.type === 'IfStatement') {
+          const condSrc = raw.slice(cur.test.start, cur.test.end).trim();
+          if (seenBranches.has(condSrc)) {
+            emit({
+              id: 'js-duplicate-else-if',
+              title: 'Duplicate condition in else-if chain',
+              severity: 'medium',
+              cwe: 'CWE-561',
+              hint: 'Remove or fix the unreachable duplicate else-if condition.',
+            }, cur.test, 'high', `Condition "${condSrc}" was already checked in an earlier branch.`);
+          }
+          seenBranches.add(condSrc);
+          cur = cur.alternate;
+        }
+      }
     }
 
     // Sparse array holes ([1, , 3]) and delete on a bare variable.
@@ -669,18 +689,35 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       }, node, 'high', `RegExp /${node.pattern}/ contains nested quantifiers.`);
     }
 
-    // Missing await on known async function call used as a standalone statement.
-    if (node.type === 'ExpressionStatement' && node.expression?.type === 'CallExpression' && node.expression.callee?.type === 'Identifier') {
-      const called = node.expression.callee.name;
-      const activeFn = fnStack[fnStack.length - 1];
-      if (activeFn?.async && asyncFnNames.has(called)) {
-        emit({
-          id: 'js-missing-await',
-          title: `Missing await on async call "${called}()"`,
-          severity: 'medium',
-          cwe: 'CWE-252',
-          hint: `Await ${called}() or handle its returned Promise so errors and ordering are not lost.`,
-        }, node, 'high', `Async function "${called}" is called inside an async function without await or .catch().`);
+    // Missing await on known async function call used as a standalone statement,
+    // or discarded return value of pure/immutable string/array methods.
+    if (node.type === 'ExpressionStatement' && node.expression?.type === 'CallExpression') {
+      const callee = node.expression.callee;
+      if (callee?.type === 'Identifier') {
+        const called = callee.name;
+        const activeFn = fnStack[fnStack.length - 1];
+        if (activeFn?.async && asyncFnNames.has(called)) {
+          emit({
+            id: 'js-missing-await',
+            title: `Missing await on async call "${called}()"`,
+            severity: 'medium',
+            cwe: 'CWE-252',
+            hint: `Await ${called}() or handle its returned Promise so errors and ordering are not lost.`,
+          }, node, 'high', `Async function "${called}" is called inside an async function without await or .catch().`);
+        }
+      } else {
+        const method = memberName(callee);
+        if (['trim', 'trimStart', 'trimEnd', 'toLowerCase', 'toUpperCase', 'slice', 'concat', 'filter'].includes(method)
+          && callee?.object?.type === 'Identifier'
+          && !['res', 'response', 'app', 'router', 'fs', 'path', 'console'].includes(callee.object.name)) {
+          emit({
+            id: 'js-ignored-immutable-return',
+            title: `Return value of .${method}() is ignored`,
+            severity: 'medium',
+            cwe: 'CWE-252',
+            hint: `.${method}() does not mutate in place; assign or return its result.`,
+          }, node, 'high', `Calling "${callee.object.name}.${method}()" without using its return value is a no-op.`);
+        }
       }
     }
 
@@ -813,6 +850,24 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
         const after = raw.slice(node.end || 0, (node.end || 0) + 24).trimStart();
         if (!new RegExp('^\\.\\s*(?:catch|finally)\\b').test(after)) {
           emit('js-promise-no-catch', node, 'medium', 'Promise chain has no rejection handler; attach .catch or provide an onRejected callback.');
+        }
+      }
+      if (['map', 'filter', 'find', 'some', 'every', 'reduce'].includes(name) && node.arguments[0]
+        && (node.arguments[0].type === 'ArrowFunctionExpression' || node.arguments[0].type === 'FunctionExpression')
+        && node.arguments[0].body?.type === 'BlockStatement' && node.arguments[0].body.body.length > 0) {
+        let hasReturn = false;
+        walkSubtree(node.arguments[0].body, (sub) => {
+          if (sub !== node.arguments[0] && (sub.type === 'FunctionDeclaration' || sub.type === 'FunctionExpression' || sub.type === 'ArrowFunctionExpression')) return false;
+          if (sub.type === 'ReturnStatement' || sub.type === 'ThrowStatement') hasReturn = true;
+        });
+        if (!hasReturn) {
+          emit({
+            id: 'js-missing-array-return',
+            title: `Missing return in Array.${name}() callback`,
+            severity: 'high',
+            cwe: 'CWE-670',
+            hint: `Return a value from the .${name}() callback (or use concise arrow syntax without {}).`,
+          }, node.arguments[0], 'high', `.${name}() callback uses a block body {} with no return statement, returning undefined.`);
         }
       }
       if (name === 'catch' && node.arguments[0] && (node.arguments[0].type === 'ArrowFunctionExpression' || node.arguments[0].type === 'FunctionExpression')) {

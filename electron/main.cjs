@@ -14,7 +14,7 @@ const statePath = () => path.join(app.getPath('userData'), 'deepcheck-projects.j
 async function readProjects() { try { return JSON.parse(await fs.readFile(statePath(), 'utf8')); } catch { return []; } }
 async function saveProjects(projects) { await fs.mkdir(path.dirname(statePath()), { recursive: true }); await fs.writeFile(statePath(), JSON.stringify(projects, null, 2), 'utf8'); }
 function createWindow() {
-  const win = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 680, backgroundColor: '#101112', title: 'DeepCheck', webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
+  const win = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 680, backgroundColor: '#101112', title: 'OSIEN DeepCheck', webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
   if (process.env.VITE_DEV_SERVER_URL) win.loadURL(process.env.VITE_DEV_SERVER_URL); else win.loadFile(path.join(__dirname, '../dist/index.html'));
 }
 if (process.versions.electron && typeof ipcMain?.handle === 'function') {
@@ -40,9 +40,15 @@ ipc('add-project', async (_event, payload) => {
 async function ensureGit() {
   const hasGit = () => execFileAsync('git', ['--version'], { windowsHide: true }).then(() => true).catch(() => false);
   if (await hasGit()) return;
-  await execFileAsync('winget', ['install', '--id', 'Git.Git', '-e', '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements'], { timeout: 300000, windowsHide: true }).catch(() => null);
-  if (await hasGit()) return;
-  throw new Error('Git is not installed. Install Git for Windows from https://git-scm.com/download/win, restart DeepCheck, then retry cloning.');
+  if (process.platform === 'win32') {
+    await execFileAsync('winget', ['install', '--id', 'Git.Git', '-e', '--source', 'winget', '--accept-package-agreements', '--accept-source-agreements'], { timeout: 300000, windowsHide: true }).catch(() => null);
+    if (await hasGit()) return;
+    throw new Error('Git is not installed. Install Git for Windows from https://git-scm.com/download/win, restart DeepCheck, then retry cloning.');
+  }
+  const hint = process.platform === 'darwin'
+    ? 'Install Git via Xcode Command Line Tools (xcode-select --install) or Homebrew (brew install git).'
+    : 'Install Git via your package manager (e.g. sudo apt install git).';
+  throw new Error(`Git is not installed. ${hint}`);
 }
 ipc('clone-repo', async (_event, payload) => {
   await ensureGit();
@@ -212,7 +218,16 @@ ipc('run-project-tests', async (_event, id) => {
   const command = project.latestRun.testCommand;
   const exec = (file, args) => execFileAsync(file, args, { cwd: project.root, timeout: 10 * 60 * 1000, windowsHide: true, maxBuffer: 2 * 1024 * 1024 });
   try {
-    const result = command === 'npm test' ? await exec('cmd.exe', ['/d', '/s', '/c', 'npm test']) : command === 'python -m pytest' ? await exec('python', ['-m', 'pytest']) : command === 'cargo test' ? await exec('cargo', ['test']) : await exec('go', ['test', './...']);
+    const runNpm = (args) => process.platform === 'win32'
+      ? exec(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', ['npm', ...args].join(' ')])
+      : exec('npm', args);
+    const result = command === 'npm test'
+      ? await runNpm(['test'])
+      : command === 'python -m pytest'
+        ? await exec(process.platform === 'win32' ? 'python' : 'python3', ['-m', 'pytest'])
+        : command === 'cargo test'
+          ? await exec('cargo', ['test'])
+          : await exec('go', ['test', './...']);
     project.latestRun.testResult = { command, exitCode: 0, output: `${result.stdout}\n${result.stderr}`.trim().slice(-50000) };
   } catch (error) { project.latestRun.testResult = { command, exitCode: error.code ?? 1, output: `${error.stdout || ''}\n${error.stderr || error.message}`.trim().slice(-50000) }; }
   await saveProjects(projects); return project.latestRun.testResult;
@@ -244,9 +259,11 @@ ipc('run-project-test-file', async (_event, payload) => {
         env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
       });
     } else if (target.runner === 'pytest') {
-      output = await execFileAsync('python', ['-m', 'pytest', relative], options);
+      output = await execFileAsync(process.platform === 'win32' ? 'python' : 'python3', ['-m', 'pytest', relative], options);
     } else if (target.runner === 'npm') {
-      output = await execFileAsync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `npm test -- "${target.file}"`], options);
+      output = process.platform === 'win32'
+        ? await execFileAsync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `npm test -- "${target.file}"`], options)
+        : await execFileAsync('npm', ['test', '--', target.file], options);
     } else if (target.runner === 'cargo') {
       if (!/^tests[\\/][\w.-]+\.rs$/i.test(target.file)) throw new Error('Cargo target path is invalid.');
       output = await execFileAsync('cargo', ['test', '--test', path.basename(target.file, '.rs')], options);
