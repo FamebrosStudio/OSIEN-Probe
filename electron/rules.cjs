@@ -734,7 +734,7 @@ const categoryRules = {
       '<form action="javascript:submitOrder()"></form>',
       '<form action="/orders" method="post"></form>',
       'Use a real server endpoint or attach a submit listener in script.'),
-    js('web-window-open-opener', 'window.open without noopener', 'medium', 'CWE-1022',
+    jsRaw('web-window-open-opener', 'window.open without noopener', 'medium', 'CWE-1022',
       /window\.open\s*\(\s*[^,)]+,\s*["']_blank["'](?![^)]*noopener)/,
       'window.open(url, "_blank");',
       'window.open(url, "_blank", "noopener,noreferrer");',
@@ -742,7 +742,7 @@ const categoryRules = {
   ],
   Software: [
     js('sw-env-secret-fallback', 'Secret with a hardcoded fallback', 'high', 'CWE-798',
-      /process\.env\.\w+\s*\|\|\s*["'][^"']{8,}["']/,
+      /process\.env\.\w*(?:SECRET|KEY|TOKEN|PASSWORD|PASSWD|PWD|AUTH|CREDENTIAL|SIGNING|SALT)\w*\s*\|\|\s*["'][^"']{8,}["']/i,
       'const key = process.env.API_KEY || "sk-live-123456";',
       'const key = requireEnv("API_KEY");',
       'A missing env var must fail loudly, not fall back to a shipped secret.', { kinds: ['Software'] }),
@@ -946,8 +946,8 @@ const categoryRules = {
       'Avoid remote downloads inside npm install lifecycle hooks.'),
     anyRaw('lib-npmrc-auth-token', 'Hardcoded npm _authToken', 'critical', 'CWE-798',
       /_authToken\s*=\s*(?!\$\{)[^\s]{8,}/,
-      '//registry.npmjs.org/:_authToken=npm_1234567890abcdef',
-      '//registry.npmjs.org/:_authToken=${NPM_TOKEN}',
+      '_authToken=npm_1234567890abcdef',
+      '_authToken=${NPM_TOKEN}',
       'Use ${NPM_TOKEN} environment substitution in .npmrc instead of committing tokens.'),
   ],
   'Data / ML': [
