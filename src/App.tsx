@@ -7,7 +7,7 @@ import './UIOverrides.css'
 type Kind = 'Website' | 'Software' | 'API / backend' | 'Mobile app' | 'Library' | 'Data / ML'
 type AiAssessment = { verdict: 'likely_real' | 'likely_false_positive' | 'uncertain'; confidence: number; rationale: string; evidence: string; reviewAdvice: string; model: string; reviewedAt: string }
 type Finding = { id: string; title: string; severity: string; file: string; line: number; excerpt: string; ruleId?: string; cwe?: string; hint?: string; confidence?: string; reason?: string; isNew?: boolean; fixed?: boolean; aiAssessment?: AiAssessment; aiReviewError?: string }
-type AiConfig = { provider: 'local' | 'cloud-codex'; model: string; codexConnected?: boolean; hasApiKey: boolean; apiKeyMasked: string; localModels: string[]; codexModels: string[] }
+type AiConfig = { provider: 'local' | 'cloud-codex'; model: string; codexConnected?: boolean; hasApiKey: boolean; apiKeyMasked: string; localModels: string[]; localAvailable?: boolean; codexModels: string[] }
 type FindingFixPreview = { projectId: string; findingId: string; file: string; explanation: string; target: string; replacement: string; model: string }
 type TestTarget = { file: string; runner: 'node' | 'npm' | 'pytest' | 'go' | 'cargo'; names?: string[]; command: string }
 type SeverityCounts = { critical: number; high: number; medium: number; low: number; info: number }
@@ -719,15 +719,19 @@ function App() {
               <div className="provider-fields">
                 <label className="field-label">
                   Active model
-                  <select
-                    className="filter-button"
-                    value={aiConfig.model}
-                    onChange={e => void saveAiSettings(aiConfig.provider, e.target.value)}
-                  >
-                    {(aiConfig.provider === 'cloud-codex' ? aiConfig.codexModels : aiConfig.localModels).map(m => (
-                      <option key={m} value={m}>{m}</option>
-                    ))}
-                  </select>
+                  {aiConfig.provider === 'local' && !aiConfig.localModels.length ? (
+                    <small className="empty-model-note">No local Ollama models installed yet. Run <code>ollama pull qwen2.5-coder:1.5b</code> and click Refresh.</small>
+                  ) : (
+                    <select
+                      className="filter-button"
+                      value={aiConfig.model}
+                      onChange={e => void saveAiSettings(aiConfig.provider, e.target.value)}
+                    >
+                      {(aiConfig.provider === 'cloud-codex' ? aiConfig.codexModels : aiConfig.localModels).map(m => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                  )}
                 </label>
                 {aiConfig.provider === 'cloud-codex' && (
                   <div className="codex-auth-box">

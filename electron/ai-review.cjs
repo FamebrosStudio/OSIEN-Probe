@@ -2,7 +2,7 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { getCodexAuthStatus, runCodexExec } = require('./codex-auth.cjs');
+const { getCodexAuthStatus, getAvailableCodexModels, runCodexExec } = require('./codex-auth.cjs');
 
 const MODEL = 'qwen3.5:0.8b';
 const PREFERRED_CODING_MODELS = [
@@ -196,7 +196,8 @@ async function reviewFindings(root, findings, options = {}) {
 async function checkAiHealth(options = {}) {
   const fetchImpl = options.fetch || fetch;
   if (options.provider === 'cloud-codex') {
-    const activeModel = options.model || CODEX_MODELS[0];
+    const availableCodex = await getAvailableCodexModels();
+    const activeModel = availableCodex.includes(options.model) ? options.model : availableCodex[0];
     const hasKey = Boolean(String(options.apiKey || '').trim());
     const codexAuth = hasKey ? { connected: false } : await getCodexAuthStatus();
     const ready = hasKey || codexAuth.connected;
@@ -207,7 +208,7 @@ async function checkAiHealth(options = {}) {
       model: activeModel,
       recommendedModel: activeModel,
       endpoint: hasKey ? OPENAI_CHAT_ENDPOINT : 'ChatGPT OAuth (Codex CLI)',
-      models: CODEX_MODELS,
+      models: availableCodex,
       message: hasKey
         ? `Cloud Codex ready · ${activeModel} (API key · "Fix finding" unlocked)`
         : codexAuth.connected
