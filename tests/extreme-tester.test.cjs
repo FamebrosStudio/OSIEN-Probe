@@ -27,6 +27,7 @@ test('getSystemProfile reports PC hardware tier and step budget', () => {
 
 test('detectWebEntry detects npm dev script and static index.html fallback', async () => {
   const npmRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'osien-web-npm-'));
+  await fs.mkdir(path.join(npmRoot, 'node_modules'));
   await fs.writeFile(path.join(npmRoot, 'package.json'), JSON.stringify({ name: 'site', scripts: { dev: 'vite' } }));
   const npmEntry = await detectWebEntry(npmRoot);
   assert.equal(npmEntry.mode, 'npm');

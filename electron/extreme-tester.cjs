@@ -46,9 +46,19 @@ async function fileExists(target) {
   }
 }
 
+async function dirExists(target) {
+  try {
+    const stat = await fs.stat(target);
+    return stat.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 async function detectWebEntry(root) {
   const pkgPath = path.join(root, 'package.json');
-  if (await fileExists(pkgPath)) {
+  const hasNodeModules = await dirExists(path.join(root, 'node_modules'));
+  if (await fileExists(pkgPath) && hasNodeModules) {
     try {
       const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf8'));
       const scripts = pkg.scripts || {};
@@ -65,6 +75,9 @@ async function detectWebEntry(root) {
     if (await fileExists(full)) {
       return { mode: 'static', entryDir: path.dirname(full), entryFile: candidate };
     }
+  }
+  if (await fileExists(pkgPath) && !hasNodeModules) {
+    return { mode: 'missing-deps' };
   }
   return { mode: 'static', entryDir: root, entryFile: null };
 }
@@ -127,28 +140,26 @@ function stripAnsi(text) {
   return String(text || '').replace(ANSI_RE, '');
 }
 
+function buildSandboxEnv() {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined) continue;
+    if (/(?:SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|API_KEY|PRIVATE_KEY|AUTH)/i.test(k)) continue;
+    env[k] = v;
+  }
+  env.BROWSER = 'none';
+  env.FORCE_COLOR = '0';
+  env.NO_COLOR = '1';
+  return env;
+}
+
 function startNpmSandboxServer(root, scriptName, onLog) {
   return new Promise((resolve, reject) => {
     if (!/^[a-zA-Z0-9:_-]+$/.test(scriptName)) {
       reject(new Error(`Invalid npm script name: ${scriptName}`));
       return;
     }
-    const env = {
-      PATH: process.env.PATH,
-      SystemRoot: process.env.SystemRoot || process.env.SYSTEMROOT,
-      SYSTEMROOT: process.env.SYSTEMROOT || process.env.SystemRoot,
-      ComSpec: process.env.ComSpec,
-      HOME: process.env.HOME,
-      USERPROFILE: process.env.USERPROFILE,
-      APPDATA: process.env.APPDATA,
-      LOCALAPPDATA: process.env.LOCALAPPDATA,
-      TEMP: process.env.TEMP,
-      TMP: process.env.TMP,
-      BROWSER: 'none',
-      PORT: '4179',
-      FORCE_COLOR: '0',
-      NO_COLOR: '1',
-    };
+    const env = buildSandboxEnv();
     const child = process.platform === 'win32'
       ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `npm.cmd run ${scriptName}`], {
           cwd: root,
@@ -161,12 +172,14 @@ function startNpmSandboxServer(root, scriptName, onLog) {
           env,
         });
 
+    const recentLogs = [];
     let settled = false;
     const timeout = setTimeout(() => {
       if (!settled) {
         settled = true;
         killProcessTree(child);
-        reject(new Error(`Timed out waiting for "npm run ${scriptName}" to expose a local URL.`));
+        const tail = recentLogs.slice(-5).join(' | ');
+        reject(new Error(`Timed out waiting for "npm run ${scriptName}" to expose a local URL.${tail ? ` Output: ${tail}` : ''}`));
       }
     }, 25000);
 
@@ -174,7 +187,11 @@ function startNpmSandboxServer(root, scriptName, onLog) {
       const text = stripAnsi(chunk.toString('utf8'));
       for (const line of text.split(/\r?\n/)) {
         const trimmed = line.trim();
-        if (trimmed) onLog(trimmed);
+        if (trimmed) {
+          recentLogs.push(trimmed);
+          if (recentLogs.length > 20) recentLogs.shift();
+          onLog(trimmed);
+        }
         const match = trimmed.match(/https?:\/\/(?:localhost|127\.0\.0\.1|\[::1\]):\d{2,5}[^\s]*/i);
         if (match && !settled) {
           settled = true;
@@ -202,7 +219,8 @@ function startNpmSandboxServer(root, scriptName, onLog) {
       if (!settled) {
         settled = true;
         clearTimeout(timeout);
-        reject(new Error(`Dev server exited early with code ${code}.`));
+        const tail = recentLogs.slice(-6).join(' | ');
+        reject(new Error(`Dev server exited early with code ${code}.${tail ? ` Output: ${tail}` : ''}`));
       }
     });
   });
@@ -376,6 +394,9 @@ async function runExtremeTest({ project, BrowserWindow, session, onEvent }) {
   try {
     emit('log', { level: 'info', text: `PC profile: ${profile.cpuCores} cores, ${profile.totalMemGb} GB RAM (${profile.tier} tier · ${profile.maxSteps} autonomous steps)` });
     const entry = await detectWebEntry(project.root);
+    if (entry.mode === 'missing-deps') {
+      throw new Error('Dependencies are not installed (missing node_modules and no built dist/index.html). Run "npm install" in this project or run a Traditional Test.');
+    }
     emit('log', { level: 'info', text: entry.mode === 'npm' ? `Starting sandboxed dev server (${entry.command})…` : `Starting isolated static sandbox server on 127.0.0.1…` });
 
     const server = entry.mode === 'npm'
