@@ -18,7 +18,12 @@ const MIME_TYPES = {
   '.jpeg': 'image/jpeg',
   '.webp': 'image/webp',
   '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
   '.woff2': 'font/woff2',
+  '.wasm': 'application/wasm',
+  '.jsx': 'application/javascript; charset=utf-8',
+  '.tsx': 'application/javascript; charset=utf-8',
+  '.ts': 'application/javascript; charset=utf-8',
 };
 
 const activeRuns = new Map();
@@ -70,7 +75,7 @@ async function detectWebEntry(root) {
       // Fall through to static detection when package.json cannot be parsed.
     }
   }
-  for (const candidate of ['index.html', 'public/index.html', 'dist/index.html', 'build/index.html']) {
+  for (const candidate of ['dist/index.html', 'build/index.html', 'out/index.html', 'index.html', 'public/index.html']) {
     const full = path.join(root, candidate);
     if (await fileExists(full)) {
       return { mode: 'static', entryDir: path.dirname(full), entryFile: candidate };
@@ -415,12 +420,21 @@ async function runExtremeTest({ project, BrowserWindow, session, onEvent }) {
     ]);
     emit('log', { level: 'info', text: `Sandbox live at ${server.url} — external network blocked` });
 
+    const blockedOrigins = new Set();
     const sandboxSession = session.fromPartition(`osien-sandbox-${project.id}-${Date.now()}`, { cache: false });
     sandboxSession.webRequest.onBeforeRequest((details, callback) => {
       const u = details.url || '';
       const allowed = [...allowedOrigins].some((o) => u.startsWith(o)) || u.startsWith('data:') || u.startsWith('blob:') || u.startsWith('devtools:');
       if (!allowed) {
-        emit('log', { level: 'warn', text: `Sandbox blocked outbound request: ${u.slice(0, 90)}` });
+        try {
+          const origin = new URL(u).origin;
+          if (!blockedOrigins.has(origin)) {
+            blockedOrigins.add(origin);
+            emit('log', { level: 'warn', text: `Sandbox blocked outbound origin: ${origin}` });
+          }
+        } catch {
+          // Ignore malformed URLs.
+        }
       }
       callback({ cancel: !allowed });
     });
@@ -499,6 +513,28 @@ async function runExtremeTest({ project, BrowserWindow, session, onEvent }) {
     });
 
     await win.loadURL(server.url);
+    emit('log', { level: 'info', text: 'Waiting for page hydration and interactive UI…' });
+    for (let w = 0; w < 24; w++) {
+      if (state.cancelled || win.isDestroyed()) break;
+      try {
+        const ready = await win.webContents.executeJavaScript(`(() => {
+          const ready = document.readyState === 'complete';
+          const textLen = (document.body?.innerText || '').trim().length;
+          const interactive = document.querySelectorAll('button, a[href], input, textarea, select').length;
+          const isLoading = /\\bloading\\b/i.test(document.body?.innerText || '') && interactive <= 2;
+          return { ready, ok: ready && !isLoading && (interactive > 0 || textLen > 80) };
+        })()`, true);
+        if (!win.isDestroyed()) {
+          const frame = await win.webContents.capturePage();
+          const jpeg = frame.resize({ width: 760, quality: 'good' }).toJPEG(72);
+          emit('frame', { dataUrl: `data:image/jpeg;base64,${jpeg.toString('base64')}` });
+        }
+        if (ready?.ok && w >= 3) break;
+      } catch (err) {
+        void err;
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
 
     let clicks = 0;
     let inputsFuzzed = 0;
