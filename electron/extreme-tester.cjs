@@ -140,7 +140,7 @@ function killProcessTree(child) {
   }
 }
 
-const ANSI_RE = new RegExp('\\u001b\\[[0-9;]*[A-Za-z]', 'g');
+const ANSI_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`, 'g');
 function stripAnsi(text) {
   return String(text || '').replace(ANSI_RE, '');
 }
@@ -231,7 +231,7 @@ function startNpmSandboxServer(root, scriptName, onLog) {
   });
 }
 
-// Pure-DOM autonomous exploration & defensive stress script injected into the sandboxed page.
+// Intelligent, curiosity-driven human-like DOM explorer, semantic form filler, and defensive stress driver.
 function buildExtremeProbeScript(stepIndex) {
   return `(() => {
     const STEP = ${Number(stepIndex)};
@@ -240,23 +240,62 @@ function buildExtremeProbeScript(stepIndex) {
     if (!cursor) {
       cursor = document.createElement('div');
       cursor.id = PROBE_ID;
-      cursor.style.cssText = 'position:fixed;z-index:2147483647;width:18px;height:18px;border-radius:50%;border:2px solid #a8c77e;background:rgba(140,207,94,0.28);box-shadow:0 0 12px rgba(168,199,126,0.75);pointer-events:none;transition:left .12s ease,top .12s ease,transform .1s ease;left:16px;top:16px;';
+      cursor.style.cssText = 'position:fixed;z-index:2147483647;width:20px;height:20px;border-radius:50%;border:2px solid #a8c77e;background:rgba(140,207,94,0.28);box-shadow:0 0 14px rgba(168,199,126,0.85);pointer-events:none;transition:left .14s ease,top .14s ease,transform .1s ease;left:16px;top:16px;';
       document.documentElement.appendChild(cursor);
     }
 
+    const mem = window.__osienBrain || (window.__osienBrain = {
+      clicked: new Map(),
+      filled: new Map(),
+      states: new Set(),
+      lastStateSig: '',
+      pendingFormSubmit: null,
+    });
+
+    const moveCursor = (el, pulse = false) => {
+      const r = el.getBoundingClientRect();
+      cursor.style.left = Math.max(4, r.left + r.width / 2 - 10) + 'px';
+      cursor.style.top = Math.max(4, r.top + r.height / 2 - 10) + 'px';
+      if (pulse) {
+        cursor.style.transform = 'scale(1.4)';
+        setTimeout(() => { cursor.style.transform = 'scale(1)'; }, 110);
+      }
+      el.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+    };
+
+    const isVisible = (el) => {
+      if (!el || el.id === PROBE_ID) return false;
+      const r = el.getBoundingClientRect();
+      const s = getComputedStyle(el);
+      return r.width > 4 && r.height > 4 && s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0' && !el.disabled;
+    };
+
+    const getLabel = (el) => {
+      const id = el.id;
+      const explicitLabel = id ? document.querySelector('label[for="' + CSS.escape(id) + '"]')?.innerText : '';
+      return (
+        el.getAttribute('aria-label') ||
+        explicitLabel ||
+        el.innerText ||
+        el.getAttribute('placeholder') ||
+        el.getAttribute('name') ||
+        el.getAttribute('title') ||
+        el.getAttribute('href') ||
+        el.tagName
+      ).replace(/\\s+/g, ' ').trim().slice(0, 56);
+    };
+
     const findings = [];
     const checkPageHealth = () => {
-      // 1. Check for horizontal layout overflow
       if (document.documentElement.scrollWidth > window.innerWidth + 8) {
         findings.push({
           ruleId: 'extreme-layout-overflow',
           title: 'Horizontal layout overflow detected',
           severity: 'low',
           cwe: 'CWE-1084',
-          detail: 'scrollWidth (' + document.documentElement.scrollWidth + 'px) exceeds viewport (' + window.innerWidth + 'px)',
+          detail: 'scrollWidth (' + document.documentElement.scrollWidth + 'px) exceeds viewport (' + window.innerWidth + 'px) at ' + location.pathname,
         });
       }
-      // 2. Check for broken images
       for (const img of document.querySelectorAll('img')) {
         if (img.complete && img.naturalWidth === 0 && img.getAttribute('src')) {
           findings.push({
@@ -268,7 +307,6 @@ function buildExtremeProbeScript(stepIndex) {
           });
         }
       }
-      // 3. Check for unescaped probe marker rendered as a live DOM element
       if (document.querySelector('[data-osien-xss-probe="1"]')) {
         findings.push({
           ruleId: 'extreme-dom-xss-unescaped',
@@ -278,7 +316,6 @@ function buildExtremeProbeScript(stepIndex) {
           detail: 'Fuzzed input containing <b data-osien-xss-probe="1"> was parsed as active HTML in the DOM.',
         });
       }
-      // 4. Check external target=_blank links missing noopener
       for (const a of document.querySelectorAll('a[target="_blank"]')) {
         const rel = (a.getAttribute('rel') || '').toLowerCase();
         if (!rel.includes('noopener')) {
@@ -287,75 +324,141 @@ function buildExtremeProbeScript(stepIndex) {
             title: 'target="_blank" link missing rel="noopener"',
             severity: 'medium',
             cwe: 'CWE-1022',
-            detail: a.getAttribute('href') || a.textContent.trim().slice(0, 60),
+            detail: a.getAttribute('href') || getLabel(a),
           });
         }
       }
-    };
-
-    const isVisible = (el) => {
-      if (!el || el.id === PROBE_ID) return false;
-      const r = el.getBoundingClientRect();
-      const s = getComputedStyle(el);
-      return r.width > 4 && r.height > 4 && s.visibility !== 'hidden' && s.display !== 'none' && !el.disabled;
-    };
-
-    const inputs = [...document.querySelectorAll('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea, select')].filter(isVisible);
-    const clickables = [...document.querySelectorAll('button, a[href], [role="button"], input[type="submit"], input[type="button"]')].filter(isVisible);
-
-    const fuzzPayloads = [
-      '',
-      '<b data-osien-xss-probe="1">probe</b>',
-      "' OR '1'='1",
-      '-999999',
-      'A'.repeat(280),
-      'probe@example.com',
-    ];
-
-    let action = 'idle';
-    let targetLabel = '';
-    const interacted = window.__osienVisited || (window.__osienVisited = new Set());
-
-    // Prefer filling an untouched visible input first, otherwise click an interactive control
-    const nextInput = inputs.find((el, idx) => !interacted.has('in:' + idx + ':' + (el.name || el.id || el.type)));
-    if (nextInput) {
-      const idx = inputs.indexOf(nextInput);
-      const key = 'in:' + idx + ':' + (nextInput.name || nextInput.id || nextInput.type);
-      interacted.add(key);
-      const r = nextInput.getBoundingClientRect();
-      cursor.style.left = Math.max(4, r.left + r.width / 2 - 9) + 'px';
-      cursor.style.top = Math.max(4, r.top + r.height / 2 - 9) + 'px';
-      nextInput.scrollIntoView({ block: 'nearest', behavior: 'instant' });
-      const payload = fuzzPayloads[STEP % fuzzPayloads.length];
-      if (nextInput.tagName === 'SELECT') {
-        const opts = nextInput.options;
-        if (opts.length > 0) nextInput.selectedIndex = (STEP % opts.length);
-      } else {
-        const proto = nextInput.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-        if (setter) setter.call(nextInput, payload);
-        else nextInput.value = payload;
+      for (const a of document.querySelectorAll('a[href^="javascript:" i]')) {
+        findings.push({
+          ruleId: 'extreme-javascript-href',
+          title: 'Unsafe javascript: URI in anchor href',
+          severity: 'high',
+          cwe: 'CWE-79',
+          detail: getLabel(a),
+        });
       }
-      nextInput.dispatchEvent(new Event('input', { bubbles: true }));
-      nextInput.dispatchEvent(new Event('change', { bubbles: true }));
-      action = 'fuzz-input';
-      targetLabel = (nextInput.getAttribute('aria-label') || nextInput.name || nextInput.placeholder || nextInput.tagName).slice(0, 48);
-    } else if (clickables.length > 0) {
-      const candidate = clickables[STEP % clickables.length];
-      const r = candidate.getBoundingClientRect();
-      cursor.style.left = Math.max(4, r.left + r.width / 2 - 9) + 'px';
-      cursor.style.top = Math.max(4, r.top + r.height / 2 - 9) + 'px';
-      cursor.style.transform = 'scale(1.35)';
-      setTimeout(() => { cursor.style.transform = 'scale(1)'; }, 90);
-      candidate.scrollIntoView({ block: 'nearest', behavior: 'instant' });
-      targetLabel = (candidate.innerText || candidate.getAttribute('aria-label') || candidate.getAttribute('href') || candidate.tagName).trim().slice(0, 48);
-      action = STEP % 5 === 0 ? 'stress-double-click' : 'click';
-      const href = candidate.getAttribute('href') || '';
-      if (candidate.tagName === 'A' && /^https?:\\/\\//i.test(href) && !href.startsWith(location.origin)) {
-        action = 'skip-external-link';
-      } else {
-        candidate.click();
-        if (action === 'stress-double-click') candidate.click();
+    };
+
+    const setNativeValue = (el, val) => {
+      const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      if (setter) setter.call(el, val);
+      else el.value = val;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+
+    const chooseSmartPayload = (el, attempt) => {
+      const meta = ((el.type || '') + ' ' + (el.name || '') + ' ' + (el.id || '') + ' ' + (el.placeholder || '') + ' ' + getLabel(el)).toLowerCase();
+      if (el.type === 'email' || /email|e-mail/.test(meta)) {
+        return attempt === 0 ? 'alex.mercer@example.com' : 'invalid-email@';
+      }
+      if (el.type === 'password' || /pass(word|wd)?/.test(meta)) {
+        return attempt === 0 ? 'Str0ng!Probe#2026' : '';
+      }
+      if (el.type === 'url' || /website|url|link/.test(meta)) {
+        return attempt === 0 ? 'https://example.com' : 'javascript:alert(1)';
+      }
+      if (el.type === 'number' || /age|qty|count|price|amount|port|limit/.test(meta)) {
+        return ['42', '-999', '0'][attempt % 3];
+      }
+      if (el.type === 'tel' || /phone|mobile|tel/.test(meta)) {
+        return '+15550199283';
+      }
+      const probes = [
+        'OSIEN Human QA Test',
+        '<b data-osien-xss-probe="1">probe</b>',
+        "' OR '1'='1",
+        'A'.repeat(240),
+      ];
+      return probes[attempt % probes.length];
+    };
+
+    const inputs = [...document.querySelectorAll('input:not([type="hidden"]), textarea, select')].filter(isVisible);
+    const clickables = [...document.querySelectorAll('button, a[href], [role="button"], [role="tab"], input[type="submit"], input[type="button"]')].filter(isVisible);
+
+    const stateSig = location.pathname + '|' + document.title + '|' + inputs.length + '|' + clickables.length + '|' + Boolean(document.querySelector('[role="dialog"], dialog[open]'));
+    const isNewState = stateSig !== mem.lastStateSig && !mem.states.has(stateSig);
+    mem.states.add(stateSig);
+    mem.lastStateSig = stateSig;
+
+    let action = 'inspect';
+    let targetLabel = '';
+    let detailNote = isNewState ? 'new UI state discovered' : '';
+
+    // 1. If we just finished filling a form, submit it like a real user!
+    if (mem.pendingFormSubmit && isVisible(mem.pendingFormSubmit)) {
+      const btn = mem.pendingFormSubmit;
+      mem.pendingFormSubmit = null;
+      moveCursor(btn, true);
+      targetLabel = getLabel(btn);
+      action = 'submit-form';
+      detailNote = 'submitting populated form';
+      btn.click();
+    } else {
+      // 2. Semantic input filling (prefer untouched or under-tested inputs)
+      const nextInput = inputs.find((el) => {
+        const key = location.pathname + '::' + getLabel(el);
+        return (mem.filled.get(key) || 0) < 2;
+      });
+
+      if (nextInput) {
+        const key = location.pathname + '::' + getLabel(nextInput);
+        const attempt = mem.filled.get(key) || 0;
+        mem.filled.set(key, attempt + 1);
+        moveCursor(nextInput, false);
+        targetLabel = getLabel(nextInput);
+
+        if (nextInput.tagName === 'SELECT') {
+          if (nextInput.options.length > 0) nextInput.selectedIndex = (attempt + 1) % nextInput.options.length;
+          nextInput.dispatchEvent(new Event('change', { bubbles: true }));
+          action = 'select-option';
+          detailNote = 'selected option #' + nextInput.selectedIndex;
+        } else if (nextInput.type === 'checkbox' || nextInput.type === 'radio') {
+          nextInput.click();
+          action = 'toggle-' + nextInput.type;
+          detailNote = 'toggled state -> ' + nextInput.checked;
+        } else {
+          const payload = chooseSmartPayload(nextInput, attempt);
+          setNativeValue(nextInput, payload);
+          action = attempt === 0 ? 'human-type' : 'fuzz-input';
+          detailNote = attempt === 0 ? 'entered realistic value' : 'probed edge/XSS escaping';
+          const form = nextInput.closest('form');
+          if (form) {
+            const submitBtn = form.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
+            if (submitBtn && isVisible(submitBtn)) mem.pendingFormSubmit = submitBtn;
+          }
+        }
+      } else if (clickables.length > 0) {
+        // 3. Curiosity-ranked click selection (human-like prioritization)
+        const scored = clickables.map((el) => {
+          const label = getLabel(el);
+          const key = location.pathname + '::' + label;
+          const seen = mem.clicked.get(key) || 0;
+          let score = seen === 0 ? 50 : Math.max(-40, 10 - seen * 20);
+          if (el.closest('[role="dialog"], dialog[open]')) score += 25;
+          if (/submit|save|create|next|continue|start|open|add|send|verify|tab|menu/i.test(label)) score += 18;
+          if (el.tagName === 'A' && el.getAttribute('href')?.startsWith('/')) score += 14;
+          if (/logout|sign ?out|delete account|remove all/i.test(label)) score -= 60;
+          const href = el.getAttribute('href') || '';
+          if (el.tagName === 'A' && /^https?:\\/\\//i.test(href) && !href.startsWith(location.origin)) score -= 100;
+          return { el, label, key, seen, score };
+        }).sort((a, b) => b.score - a.score);
+
+        const pick = scored[0];
+        mem.clicked.set(pick.key, pick.seen + 1);
+        moveCursor(pick.el, true);
+        targetLabel = pick.label;
+        const href = pick.el.getAttribute('href') || '';
+        if (pick.el.tagName === 'A' && /^https?:\\/\\//i.test(href) && !href.startsWith(location.origin)) {
+          action = 'skip-external';
+          detailNote = 'kept inside sandbox';
+        } else {
+          action = STEP % 7 === 0 ? 'stress-double-click' : 'human-click';
+          detailNote = 'priority ' + pick.score + (pick.seen === 0 ? ' · first visit' : ' · re-test');
+          pick.el.click();
+          if (action === 'stress-double-click') pick.el.click();
+        }
       }
     }
 
@@ -365,6 +468,7 @@ function buildExtremeProbeScript(stepIndex) {
       title: document.title,
       action,
       targetLabel,
+      detailNote,
       inputsCount: inputs.length,
       clickablesCount: clickables.length,
       findings,
@@ -546,15 +650,15 @@ async function runExtremeTest({ project, BrowserWindow, session, onEvent }) {
         const res = await win.webContents.executeJavaScript(buildExtremeProbeScript(step), true);
         if (res) {
           routes.add(res.url);
-          if (res.action === 'fuzz-input') inputsFuzzed += 1;
-          else if (res.action === 'click' || res.action === 'stress-double-click') clicks += 1;
+          if (res.action === 'fuzz-input' || res.action === 'human-type' || res.action === 'select-option') inputsFuzzed += 1;
+          else if (res.action === 'human-click' || res.action === 'stress-double-click' || res.action === 'submit-form') clicks += 1;
           for (const f of res.findings || []) pushFinding(f);
           emit('step', {
             step: step + 1,
             maxSteps: profile.maxSteps,
             url: res.url,
             action: res.action,
-            targetLabel: res.targetLabel,
+            targetLabel: res.detailNote ? `${res.targetLabel} (${res.detailNote})` : res.targetLabel,
             stats: { pages: routes.size, clicks, inputsFuzzed, findings: emittedFindings.size },
           });
         }
