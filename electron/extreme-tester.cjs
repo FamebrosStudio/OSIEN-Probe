@@ -31,7 +31,7 @@ function getSystemProfile() {
   const freeMemGb = Math.round((freeBytes / (1024 ** 3)) * 10) / 10;
   const cpuCores = cpus.length || 2;
   const cpuModel = cpus[0]?.model?.trim() || 'Local CPU';
-  const tier = totalMemGb >= 16 && cpuCores >= 8 ? 'high' : totalMemGb >= 8 && cpuCores >= 4 ? 'balanced' : 'light';
+  const tier = totalMemGb >= 15 && cpuCores >= 8 ? 'high' : totalMemGb >= 7 && cpuCores >= 4 ? 'balanced' : 'light';
   const maxSteps = tier === 'high' ? 80 : tier === 'balanced' ? 55 : 35;
   const stepDelayMs = tier === 'high' ? 140 : tier === 'balanced' ? 200 : 280;
   return { cpuModel, cpuCores, totalMemGb, freeMemGb, tier, maxSteps, stepDelayMs };
@@ -122,24 +122,44 @@ function killProcessTree(child) {
   }
 }
 
+const ANSI_RE = new RegExp('\\u001b\\[[0-9;]*[A-Za-z]', 'g');
+function stripAnsi(text) {
+  return String(text || '').replace(ANSI_RE, '');
+}
+
 function startNpmSandboxServer(root, scriptName, onLog) {
   return new Promise((resolve, reject) => {
-    const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    const child = spawn(npmCmd, ['run', scriptName], {
-      cwd: root,
-      windowsHide: true,
-      env: {
-        PATH: process.env.PATH,
-        SYSTEMROOT: process.env.SYSTEMROOT,
-        ComSpec: process.env.ComSpec,
-        HOME: process.env.HOME,
-        USERPROFILE: process.env.USERPROFILE,
-        APPDATA: process.env.APPDATA,
-        LOCALAPPDATA: process.env.LOCALAPPDATA,
-        BROWSER: 'none',
-        PORT: '4179',
-      },
-    });
+    if (!/^[a-zA-Z0-9:_-]+$/.test(scriptName)) {
+      reject(new Error(`Invalid npm script name: ${scriptName}`));
+      return;
+    }
+    const env = {
+      PATH: process.env.PATH,
+      SystemRoot: process.env.SystemRoot || process.env.SYSTEMROOT,
+      SYSTEMROOT: process.env.SYSTEMROOT || process.env.SystemRoot,
+      ComSpec: process.env.ComSpec,
+      HOME: process.env.HOME,
+      USERPROFILE: process.env.USERPROFILE,
+      APPDATA: process.env.APPDATA,
+      LOCALAPPDATA: process.env.LOCALAPPDATA,
+      TEMP: process.env.TEMP,
+      TMP: process.env.TMP,
+      BROWSER: 'none',
+      PORT: '4179',
+      FORCE_COLOR: '0',
+      NO_COLOR: '1',
+    };
+    const child = process.platform === 'win32'
+      ? spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `npm.cmd run ${scriptName}`], {
+          cwd: root,
+          windowsHide: true,
+          env,
+        })
+      : spawn('npm', ['run', scriptName], {
+          cwd: root,
+          windowsHide: true,
+          env,
+        });
 
     let settled = false;
     const timeout = setTimeout(() => {
@@ -148,10 +168,10 @@ function startNpmSandboxServer(root, scriptName, onLog) {
         killProcessTree(child);
         reject(new Error(`Timed out waiting for "npm run ${scriptName}" to expose a local URL.`));
       }
-    }, 22000);
+    }, 25000);
 
     const handleChunk = (chunk) => {
-      const text = chunk.toString('utf8');
+      const text = stripAnsi(chunk.toString('utf8'));
       for (const line of text.split(/\r?\n/)) {
         const trimmed = line.trim();
         if (trimmed) onLog(trimmed);
@@ -159,9 +179,8 @@ function startNpmSandboxServer(root, scriptName, onLog) {
         if (match && !settled) {
           settled = true;
           clearTimeout(timeout);
-          const normalized = match[0].replace('localhost', '127.0.0.1').replace('[::1]', '127.0.0.1');
           resolve({
-            url: normalized,
+            url: match[0],
             close: async () => {
               killProcessTree(child);
             },
@@ -365,13 +384,20 @@ async function runExtremeTest({ project, BrowserWindow, session, onEvent }) {
     state.server = server;
     if (state.cancelled) return { cancelled: true };
 
-    const targetOrigin = new URL(server.url).origin;
+    const targetUrl = new URL(server.url);
+    const targetPort = targetUrl.port;
+    const allowedOrigins = new Set([
+      targetUrl.origin,
+      `http://localhost${targetPort ? `:${targetPort}` : ''}`,
+      `http://127.0.0.1${targetPort ? `:${targetPort}` : ''}`,
+      `http://[::1]${targetPort ? `:${targetPort}` : ''}`,
+    ]);
     emit('log', { level: 'info', text: `Sandbox live at ${server.url} — external network blocked` });
 
     const sandboxSession = session.fromPartition(`osien-sandbox-${project.id}-${Date.now()}`, { cache: false });
     sandboxSession.webRequest.onBeforeRequest((details, callback) => {
       const u = details.url || '';
-      const allowed = u.startsWith(targetOrigin) || u.startsWith('data:') || u.startsWith('blob:') || u.startsWith('devtools:');
+      const allowed = [...allowedOrigins].some((o) => u.startsWith(o)) || u.startsWith('data:') || u.startsWith('blob:') || u.startsWith('devtools:');
       if (!allowed) {
         emit('log', { level: 'warn', text: `Sandbox blocked outbound request: ${u.slice(0, 90)}` });
       }
@@ -527,6 +553,8 @@ module.exports = {
   getSystemProfile,
   detectWebEntry,
   startStaticSandboxServer,
+  startNpmSandboxServer,
+  stripAnsi,
   buildExtremeProbeScript,
   runExtremeTest,
   stopExtremeTest,

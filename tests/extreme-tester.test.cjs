@@ -11,6 +11,8 @@ const {
   getSystemProfile,
   detectWebEntry,
   startStaticSandboxServer,
+  startNpmSandboxServer,
+  stripAnsi,
   buildExtremeProbeScript,
 } = require('../electron/extreme-tester.cjs');
 
@@ -62,4 +64,28 @@ test('buildExtremeProbeScript produces valid executable probe script', () => {
   assert.match(src, /__osien_probe_cursor__/);
   assert.match(src, /data-osien-xss-probe/);
   assert.doesNotThrow(() => new Function(src));
+});
+
+test('startNpmSandboxServer spawns npm script without EINVAL and strips ANSI URL output', async () => {
+  assert.equal(stripAnsi('\x1b[36mhttp://localhost:\x1b[1m5173/\x1b[22m\x1b[39m'), 'http://localhost:5173/');
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'osien-npm-srv-'));
+  await fs.writeFile(path.join(root, 'server.js'), `
+    const http = require('node:http');
+    const srv = http.createServer((_req, res) => res.end('ok'));
+    srv.listen(0, '127.0.0.1', () => {
+      console.log('\\x1b[32mLocal:\\x1b[39m http://localhost:' + srv.address().port + '/');
+    });
+  `);
+  await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({
+    name: 'npm-srv-test',
+    scripts: { dev: 'node server.js' },
+  }));
+  const logs = [];
+  const srv = await startNpmSandboxServer(root, 'dev', (line) => logs.push(line));
+  try {
+    assert.match(srv.url, /^http:\/\/localhost:\d+\/$/);
+    assert.ok(logs.some((l) => l.includes('Local:')));
+  } finally {
+    await srv.close();
+  }
 });
