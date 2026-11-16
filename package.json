@@ -1,7 +1,7 @@
 {
   "name": "deepcheck",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Local static analysis, multi-language AST bug finder, and AI-assisted finding reviewer.",
   "type": "module",
   "main": "electron/main.cjs",
@@ -55,8 +55,8 @@
     "wait-on": "^9.5.1"
   },
   "build": {
-    "appId": "dev.osien.deepcheck",
-    "productName": "OSIEN DeepCheck",
+    "appId": "dev.osien.probe",
+    "productName": "OSIEN Probe",
     "compression": "normal",
     "directories": {
       "output": "release"

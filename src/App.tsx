@@ -274,7 +274,7 @@ function App() {
 
   return <div className="app-shell">
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark"><ShieldCheck size={19}/></span><span>OSIEN DeepCheck</span></div>
+      <div className="brand"><span className="brand-mark"><ShieldCheck size={19}/></span><span>OSIEN Probe</span></div>
       <div className="workspace-wrap">
         <button className="workspace" onClick={() => setWorkspaceOpen(v => !v)}>
           <div className="workspace-icon"><Folder size={15}/></div>
@@ -442,7 +442,7 @@ function App() {
           </div>
         )}
       </section>
-      <footer><span>OSIEN DeepCheck <span className="footer-sep">·</span> Local desktop app</span><span><span className="footer-status"/> Local analysis</span></footer>
+      <footer><span>OSIEN Probe <span className="footer-sep">·</span> Local desktop app</span><span><span className="footer-status"/> Local analysis</span></footer>
     </main>
     {dialog && <div className="overlay" onMouseDown={e => { if (e.target === e.currentTarget && busy !== 'add') setDialog(false) }}>
       <section className="dialog">
@@ -857,7 +857,7 @@ function InfoDialog({ onClose }: { onClose(): void }) {
   return <div className="overlay" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
     <section className="dialog">
       <div className="dialog-head">
-        <div><h2>About OSIEN DeepCheck scans</h2><p>Local source checks, AI review, and project tests are separate steps</p></div>
+        <div><h2>About OSIEN Probe scans</h2><p>Local source checks, AI review, and project tests are separate steps</p></div>
         <button className="icon-button" onClick={onClose}><X size={18}/></button>
       </div>
       <div className="help-copy">

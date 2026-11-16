@@ -14,7 +14,7 @@ const statePath = () => path.join(app.getPath('userData'), 'deepcheck-projects.j
 async function readProjects() { try { return JSON.parse(await fs.readFile(statePath(), 'utf8')); } catch { return []; } }
 async function saveProjects(projects) { await fs.mkdir(path.dirname(statePath()), { recursive: true }); await fs.writeFile(statePath(), JSON.stringify(projects, null, 2), 'utf8'); }
 function createWindow() {
-  const win = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 680, backgroundColor: '#101112', title: 'OSIEN DeepCheck', webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
+  const win = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 680, backgroundColor: '#101112', title: 'OSIEN Probe', webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
   if (process.env.VITE_DEV_SERVER_URL) win.loadURL(process.env.VITE_DEV_SERVER_URL); else win.loadFile(path.join(__dirname, '../dist/index.html'));
 }
 if (process.versions.electron && typeof ipcMain?.handle === 'function') {
