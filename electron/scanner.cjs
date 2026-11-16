@@ -360,11 +360,18 @@ function evaluateTaint(lines, lang) {
   return { byLine };
 }
 
-function contextFor(rule, line, taintedNames) {
+function contextFor(rule, line, taintedNames, lines = [], lineIndex = -1) {
   const sourceMatch = USER_INPUT.test(line) || [...taintedNames].some((name) => {
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     return new RegExp(`(^|[^\\w$])${escaped}(?=$|[^\\w$])`).test(line);
   });
+
+  if (rule.id === 'mob-android-exported' && lineIndex >= 0 && lines.length) {
+    const windowText = lines.slice(lineIndex, Math.min(lines.length, lineIndex + 10)).join('\n');
+    if (/android\.intent\.action\.MAIN/.test(windowText) && /android\.intent\.category\.LAUNCHER/.test(windowText)) {
+      return { report: false };
+    }
+  }
 
   if (['js-innerhtml', 'js-outerhtml', 'js-document-write', 'js-insert-adjacent-html'].includes(rule.id)) {
     const rhs = line.split(/(?:innerHTML|outerHTML)\s*=|document\.write\s*\(|insertAdjacentHTML\s*\(/i).slice(1).join(' ');
@@ -672,7 +679,7 @@ function scanFileContent(raw, rel, extName, lang, catalog, applicableByLang) {
         const lookahead = rawSearchLines.slice(i + 1, i + 6).join('\n');
         if (new RegExp('\\.catch\\b').test(lookahead)) continue;
       }
-      const context = contextFor(rule, lines[i], taint.byLine[i] || new Set());
+      const context = contextFor(rule, lines[i], taint.byLine[i] || new Set(), lines, i);
       if (!context.report) continue;
       const key = `${rel}:${i + 1}`;
       if (foundLines.has(key)) continue;

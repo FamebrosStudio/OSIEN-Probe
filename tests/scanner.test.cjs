@@ -538,6 +538,28 @@ test('detects missing return in array callbacks and duplicate else-if branches',
   assert.ok(ruleIds.has('js-duplicate-else-if'));
 });
 
+test('allows Android MAIN/LAUNCHER exported activity while flagging non-launcher exported components', async () => {
+  const root = await fixture({
+    'AndroidManifest.xml': [
+      '<manifest>',
+      '  <application android:allowBackup="false">',
+      '    <activity android:name=".MainActivity" android:exported="true">',
+      '      <intent-filter>',
+      '        <action android:name="android.intent.action.MAIN" />',
+      '        <category android:name="android.intent.category.LAUNCHER" />',
+      '      </intent-filter>',
+      '    </activity>',
+      '    <activity android:name=".DebugActivity" android:exported="true" />',
+      '  </application>',
+      '</manifest>',
+    ].join('\n'),
+  });
+  const result = await scanProjectRoot(root, 'Mobile app');
+  const exported = result.findings.filter((f) => f.ruleId === 'mob-android-exported');
+  assert.equal(exported.length, 1);
+  assert.equal(exported[0].line, 9);
+});
+
 test('scans the DeepCheck repo itself without crashing', async () => {
   const root = path.resolve(__dirname, '..');
   const result = await scanProjectRoot(root, 'Software');

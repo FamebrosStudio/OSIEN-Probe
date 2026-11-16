@@ -79,6 +79,11 @@ test('reports parser-marked syntax errors without treating valid code as erroneo
     'broken.go': 'package main\nfunc broken( {\n',
     'broken.rs': 'fn broken( {\n',
     'valid.go': 'package main\nfunc okay() {}\n',
+    'modern.kt': [
+      'val r = radarData.filter { it.score in 0.5f..<0.8f }',
+      '@Composable fun Box(content: @Composable RowScope.() -> Unit) {}',
+      'val msg = when (res) { is Ok -> if (!host) "🏆 WIN" else "OK"; else -> "ERR" }',
+    ].join('\n'),
   });
   const syntaxFindings = result.findings.filter((finding) => finding.ruleId === 'polyglot-syntax-error');
 

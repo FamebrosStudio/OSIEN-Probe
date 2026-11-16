@@ -90,6 +90,7 @@ const rules = [
 ];
 
 let registered = false;
+const RELIABLE_SYNTAX_ERROR_LANGS = new Set(['python', 'go', 'rust', 'java', 'cpp', 'csharp', 'bash']);
 const rulesByLang = new Map();
 for (const rule of rules) {
   const list = rulesByLang.get(rule.lang) || [];
@@ -118,10 +119,12 @@ function analyzePolyglot(source, file, extension, suppressions) {
   const emitted = new Set();
   const findings = [];
   let syntaxErrors = [];
-  try {
-    syntaxErrors = root.findAll(kind(language, 'ERROR'));
-  } catch (error) {
-    syntaxErrors = error ? [] : [];
+  if (RELIABLE_SYNTAX_ERROR_LANGS.has(language)) {
+    try {
+      syntaxErrors = root.findAll(kind(language, 'ERROR'));
+    } catch (error) {
+      syntaxErrors = error ? [] : [];
+    }
   }
   for (const error of syntaxErrors.slice(0, 20)) {
     const line = error.range().start.line + 1;
