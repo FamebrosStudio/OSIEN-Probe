@@ -345,6 +345,30 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
         }
       }
 
+      // Detect unconditional self-recursion (missing base-case guard).
+      if (fnName && node.body?.type === 'BlockStatement') {
+        let hasBranch = false;
+        let selfCall = null;
+        walkSubtree(node.body, (sub) => {
+          if (sub !== node && (sub.type === 'FunctionDeclaration' || sub.type === 'FunctionExpression' || sub.type === 'ArrowFunctionExpression')) return false;
+          if (['IfStatement', 'ConditionalExpression', 'SwitchStatement', 'LogicalExpression', 'ForStatement', 'WhileStatement', 'DoWhileStatement', 'TryStatement'].includes(sub.type)) {
+            hasBranch = true;
+          }
+          if (!selfCall && sub.type === 'CallExpression' && sub.callee?.type === 'Identifier' && sub.callee.name === fnName) {
+            selfCall = sub;
+          }
+        });
+        if (selfCall && !hasBranch) {
+          emit({
+            id: 'js-unbounded-recursion',
+            title: `Unconditional recursion in "${fnName}()"`,
+            severity: 'high',
+            cwe: 'CWE-674',
+            hint: 'Add a base-case condition before recursing to avoid a RangeError stack overflow.',
+          }, selfCall, 'high', `Function "${fnName}" calls itself without any conditional base-case guard.`);
+        }
+      }
+
       // Detect async read-modify-write race condition on outer/shared variables.
       if (node.async && node.body?.type === 'BlockStatement') {
         const stmts = node.body.body || [];
@@ -564,6 +588,26 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       }, node.test, 'high', 'if() condition is a constant literal that never changes at runtime.');
     }
 
+    // Sparse array holes ([1, , 3]) and delete on a bare variable.
+    if (node.type === 'ArrayExpression' && node.elements?.some((el) => el === null)) {
+      emit({
+        id: 'js-sparse-array-hole',
+        title: 'Sparse array literal with empty slot',
+        severity: 'low',
+        cwe: 'CWE-670',
+        hint: 'Remove the extra comma or use explicit undefined if intentional.',
+      }, node, 'high', 'Double comma in array literal creates an empty slot (undefined hole).');
+    }
+    if (node.type === 'UnaryExpression' && node.operator === 'delete' && node.argument?.type === 'Identifier') {
+      emit({
+        id: 'js-delete-var',
+        title: 'delete applied to a variable identifier',
+        severity: 'medium',
+        cwe: 'CWE-670',
+        hint: 'delete only removes object properties; it throws a SyntaxError in strict mode on variables.',
+      }, node, 'high', `delete ${node.argument.name} is invalid in strict mode and ineffective on local bindings.`);
+    }
+
     // ReDoS-prone nested quantifier regex literal.
     if (node.type === 'RegExpLiteral' && /\([^)]*[+*][^)]*\)[+*]/.test(node.pattern)) {
       emit({
@@ -719,6 +763,18 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
         const after = raw.slice(node.end || 0, (node.end || 0) + 24).trimStart();
         if (!new RegExp('^\\.\\s*(?:catch|finally)\\b').test(after)) {
           emit('js-promise-no-catch', node, 'medium', 'Promise chain has no rejection handler; attach .catch or provide an onRejected callback.');
+        }
+      }
+      if (name === 'catch' && node.arguments[0] && (node.arguments[0].type === 'ArrowFunctionExpression' || node.arguments[0].type === 'FunctionExpression')) {
+        const cb = node.arguments[0];
+        if (cb.body?.type === 'BlockStatement' && cb.body.body.length === 0) {
+          emit({
+            id: 'js-empty-promise-catch',
+            title: 'Empty Promise .catch() handler',
+            severity: 'medium',
+            cwe: 'CWE-390',
+            hint: 'Log or handle the rejection instead of swallowing it silently.',
+          }, node, 'medium', 'Promise .catch() handler has an empty block and silently discards errors.');
         }
       }
     }

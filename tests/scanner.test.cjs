@@ -468,6 +468,22 @@ test('detects switch fallthrough, duplicate case, return in finally, and async P
   }
 });
 
+test('detects unbounded recursion, empty promise catch, and sparse array holes', async () => {
+  const root = await fixture({
+    'extra.js': [
+      "'use strict';",
+      'function spin(n) { return spin(n - 1); }',
+      'const arr = [1, , 3];',
+      'Promise.resolve(1).catch(() => {});',
+    ].join('\n'),
+  });
+  const result = await scanProjectRoot(root, 'Software');
+  const ruleIds = new Set(result.findings.map((f) => f.ruleId));
+  for (const expected of ['js-unbounded-recursion', 'js-sparse-array-hole', 'js-empty-promise-catch']) {
+    assert.ok(ruleIds.has(expected), `expected ${expected} to be detected`);
+  }
+});
+
 test('scans the DeepCheck repo itself without crashing', async () => {
   const root = path.resolve(__dirname, '..');
   const result = await scanProjectRoot(root, 'Software');
