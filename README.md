@@ -15,15 +15,18 @@ If Electron is blocked by a Windows Application Control policy, launch the execu
 Start-Process -FilePath '.\node_modules\electron\dist\electron.exe' -ArgumentList '.' -WorkingDirectory 'C:\Users\VIVOBOOK\deepcheck'
 ```
 
-For Git URLs, DeepCheck clones into its local application-data folder, scans the clone, and then shows detected test commands. Test commands are never run automatically; use Run tests and confirm the prompt. If Git is missing, DeepCheck attempts to install it with winget and otherwise shows an installation link.
+For Git URLs, DeepCheck clones into its local application-data folder, scans the clone, and then shows detected test commands and individually runnable test files where supported. Tests are never run automatically; confirm each file or full-suite run. If Git is missing, DeepCheck attempts to install it with winget and otherwise shows an installation link.
 
 ## What the scanner actually does
 
-Static source checks only. No project code is executed during a scan. Rule catalog: `electron/rules.cjs`; matching, ignore handling and inline suppressions: `electron/scanner.cjs`.
+Static source checks only. No project code is executed during a scan. Rule catalog: `electron/rules.cjs`; matching, ignore handling and inline suppressions: `electron/scanner.cjs`; multi-language AST checks: `electron/polyglot.cjs`. JavaScript/TypeScript and selected Python, Go, Rust, Java/Kotlin, C/C++, C#, Ruby, PHP, Swift, and shell code receive syntax-aware API checks. Parser-reported syntax errors are surfaced for grammars that provide reliable error nodes; this is not a compiler replacement. Checks are not type-aware or whole-program proof.
 
-Findings include a confidence label and a short explanation. For HTML sinks, the scanner tracks simple same-file JavaScript assignments from common request/browser input sources. Statically assigned HTML strings are excluded; dynamic HTML sinks are reported, with higher confidence when an input source is visible. This is deliberately shallow data-flow analysis, not a JavaScript parser or proof of exploitability.
+Findings include a confidence label and a short explanation. For HTML sinks, the scanner tracks simple same-file JavaScript assignments from common request/browser input sources. Statically assigned HTML strings are excluded; dynamic HTML sinks are reported, with higher confidence when an input source is visible. This is deliberately shallow data-flow analysis, not type-aware or cross-file analysis, and is not proof of exploitability.
 
-- **Rule catalog:** 100+ stable-ID rules with CWE IDs, remediation hints, and positive/negative samples. Categories cover JavaScript/TypeScript, Python, HTML, CSS, JSON, YAML, shell, and SQL. Each category has over 120 applicable rules, but only rules matching a file's detected language are evaluated.
+- **Rule catalog:** stable-ID rules with CWE IDs, remediation hints, and positive/negative samples. Categories cover JavaScript/TypeScript, Python, HTML/XML, CSS, JSON, YAML, shell, SQL, and secrets (including AWS, GitHub classic and fine-grained PATs, OpenAI, Anthropic, npm, Slack, Google Cloud, Stripe, private keys, and connection strings) in Go, Rust, Java/Kotlin, PHP, Ruby, C/C++, C#, Swift, Dart, Scala, and common config files. Multi-language AST checks target dangerous APIs and deserialization patterns across all 11 registered tree-sitter grammars (Python, Go, Rust, Java, Kotlin, C/C++, C#, Ruby, PHP, Swift, and Bash).
+- **Same-file taint & sanitizer tracking:** tracks request/browser input assignments and object destructuring (`const { q } = req.query`), clears taint when values pass through known sanitizers (`DOMPurify.sanitize`, `encodeURIComponent`, `Number`, `path.basename`, `ast.literal_eval`, etc.), and elevates confidence when unsanitized input reaches HTML, SQL, regex, redirect, filesystem, or SSRF sinks.
+- **Local AI review & fast-fail circuit breaker:** findings are reviewed by local Ollama (`qwen3.5:0.8b`) using snippet-only context. If Ollama is unreachable or the model is missing, DeepCheck fast-fails the remaining batch immediately instead of repeating connection timeouts.
+- **Reports & CI gating:** export findings as **SARIF 2.1.0**, **Markdown**, or **JSON** from the desktop UI or CLI (`--sarif`, `--markdown`, `--json`, `--fail-on <severity>`).
 - **Categories:** Website, Software, API / backend, Mobile app, Library, Data / ML.
 - **Rule checks:** applicable language/category rules × files scanned. This is a workload metric, not a test count.
 - **Skips:** `node_modules`, `dist`, `build`, `coverage`, `.git`, `target`, `.venv`, `vendor`, lockfiles, and files over 1 MB. Scans stop at 6,000 files or 1,000 findings and set `truncated`.
@@ -37,7 +40,7 @@ Findings include a confidence label and a short explanation. For HTML sinks, the
 npm test
 ```
 
-`npm test` runs over 340 assertions against the real scanner. `tests/rules.test.cjs` generates positive and negative tests for every rule; `tests/scanner.test.cjs` covers end-to-end behavior, source-to-sink context, comment handling, suppressions, secrets, ignore globs and repeatability:
+`npm test` runs assertions against the real scanner. `tests/rules.test.cjs` generates positive and negative tests for every catalog rule; scanner and polyglot tests cover end-to-end behavior, AST detections, test-file discovery, source-to-sink context, suppressions, secrets, ignore globs and repeatability:
 
 | Test | What it proves |
 | --- | --- |
@@ -54,22 +57,25 @@ npm test
 | Language-aware rule accounting | `rulesEvaluated` equals applicable language rules × files |
 | Size guard | Files over 1 MB are skipped |
 | Known gaps | Obfuscated calls and context-dependent data flow are not claimed as detected |
+| Per-file tests | Node and pytest files are listed separately and are not executed during a scan |
 | SQL template injection | Backtick SQL with `${}` is detected |
 | Self-scan | The repo scans end to end without crashing |
 
-Command-line audit, same engine the UI uses:
+Command-line audit, same engine the UI uses (supports `--sarif`, `--markdown`, `--json`, and `--fail-on <severity>`):
 
 ```powershell
 npm run audit -- C:\path\to\project "Website"
+npm run audit -- C:\path\to\project "Software" --sarif
+npm run audit -- C:\path\to\project "API / backend" --fail-on high
 ```
 
 ## Known limits (read before trusting a result)
 
-1. **Heuristic, not proof.** A finding means a pattern matched. It does not confirm exploitability. Treat critical/high as "inspect this first", not "this is exploitable".
+1. **Heuristic, not proof.** A finding means a pattern or selected syntax-aware check matched. It does not confirm exploitability. Treat critical/high as "inspect this first", not "this is exploitable".
 2. **False negatives are real.** Obfuscated calls (`globalThis['ev'+'al']`), `%`/`.format` SQL building, framework-specific sinks, and cross-file data flow are not modelled.
 3. **False positives exist.** Rules run per line without knowing the language or framework. `console.log` in a build script, `var` in generated code, and test fixtures containing sample bugs all get reported.
 4. **Test fixtures count.** If a repo stores deliberately broken sample files, they are scanned and reported like production code.
-5. **No real test execution in a scan.** Detected test commands run only after you confirm the prompt.
+5. **Test execution is opt-in.** Scans only discover tests. Supported Node and pytest files can be run individually; the full project suite is a separate action. Test code can execute arbitrary commands, modify files, or access the network.
 6. **Binary and generated files** are skipped by extension, size, or ignore list.
 
 ## UI registry and MCP

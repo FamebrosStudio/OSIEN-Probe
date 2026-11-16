@@ -25,7 +25,7 @@ function isWithin(root, target) {
   return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 }
 
-async function getSourceContext(root, file, line) {
+async function getSourceContext(root, file, line, radius = CONTEXT_RADIUS) {
   const realRoot = await fs.realpath(root);
   const fullPath = path.resolve(realRoot, file);
   if (!isWithin(realRoot, fullPath)) throw new Error('Finding path is outside the connected project.');
@@ -34,12 +34,17 @@ async function getSourceContext(root, file, line) {
 
   const source = await fs.readFile(realFile, 'utf8');
   const lines = source.split(/\r?\n/);
-  const first = Math.max(0, line - CONTEXT_RADIUS - 1);
-  const last = Math.min(lines.length, line + CONTEXT_RADIUS);
-  const context = lines.slice(first, last)
-    .map((text, index) => `${first + index + 1}: ${text.slice(0, 300)}`)
+  const first = Math.max(0, line - radius - 1);
+  const last = Math.min(lines.length, line + radius);
+  const snippetLines = lines.slice(first, last).map((text, index) => ({
+    number: first + index + 1,
+    text: text.slice(0, 300),
+    isTarget: first + index + 1 === line,
+  }));
+  const context = snippetLines
+    .map((item) => `${item.number}: ${item.text}`)
     .join('\n');
-  return { context: context.slice(0, MAX_CONTEXT_CHARS), totalLines: lines.length };
+  return { context: context.slice(0, MAX_CONTEXT_CHARS), lines: snippetLines, totalLines: lines.length };
 }
 
 function parseVerdict(content) {
@@ -86,18 +91,18 @@ async function verifyFinding(root, finding, options = {}) {
     response = await fetchImpl(endpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      signal: AbortSignal.timeout(options.timeoutMs || 120000),
+      signal: AbortSignal.timeout(options.timeoutMs || 60000),
       body: JSON.stringify({
         model,
         stream: false,
         format: VERDICT_SCHEMA,
         think: false,
-        keep_alive: '1m',
+        keep_alive: '5m',
         messages: [
           { role: 'system', content: 'Assess static-analysis findings conservatively. Never edit code. Return valid JSON only.' },
           { role: 'user', content: prompt },
         ],
-        options: { temperature: 0, num_ctx: 2048, num_predict: 384, num_gpu: 0 },
+        options: { temperature: 0, num_ctx: 1024, num_predict: 160 },
       }),
     });
   } catch (error) {
@@ -115,20 +120,77 @@ async function verifyFinding(root, finding, options = {}) {
 
 async function reviewFindings(root, findings, options = {}) {
   const results = { reviewed: 0, failed: 0 };
+  let fatalError = null;
   for (let index = 0; index < findings.length; index++) {
     const finding = findings[index];
+    if (options.shouldStop?.()) break;
+    if (fatalError) {
+      delete finding.aiAssessment;
+      finding.aiReviewError = fatalError;
+      results.failed++;
+      if (options.onFinding) await options.onFinding(finding, index + 1, findings.length);
+      continue;
+    }
     try {
       finding.aiAssessment = await verifyFinding(root, finding, options);
       delete finding.aiReviewError;
       results.reviewed++;
     } catch (error) {
       delete finding.aiAssessment;
-      finding.aiReviewError = String(error?.message || error).slice(0, 500);
+      const message = String(error?.message || error).slice(0, 500);
+      finding.aiReviewError = message;
       results.failed++;
+      if (/^(?:Cannot reach Ollama|Model .+ is not installed)/.test(message)) {
+        fatalError = message;
+      }
     }
     if (options.onFinding) await options.onFinding(finding, index + 1, findings.length);
   }
   return results;
 }
 
-module.exports = { MODEL, ENDPOINT, getSourceContext, parseVerdict, verifyFinding, reviewFindings };
+async function checkAiHealth(options = {}) {
+  const fetchImpl = options.fetch || fetch;
+  const model = options.model || MODEL;
+  const tagsEndpoint = options.tagsEndpoint || ENDPOINT.replace(/\/api\/chat$/, '/api/tags');
+  try {
+    const response = await fetchImpl(tagsEndpoint, {
+      method: 'GET',
+      signal: AbortSignal.timeout(options.timeoutMs || 3500),
+    });
+    if (!response.ok) {
+      return {
+        available: false,
+        modelInstalled: false,
+        model,
+        endpoint: ENDPOINT,
+        models: [],
+        message: `Ollama returned HTTP ${response.status}.`,
+      };
+    }
+    const data = await response.json();
+    const models = Array.isArray(data?.models) ? data.models.map((item) => String(item.name || item.model || '')).filter(Boolean) : [];
+    const modelInstalled = models.some((name) => name === model || name.startsWith(`${model}:`));
+    return {
+      available: true,
+      modelInstalled,
+      model,
+      endpoint: ENDPOINT,
+      models,
+      message: modelInstalled
+        ? `Local Ollama online · ${model} ready`
+        : `Ollama is running, but ${model} is not installed. Run: ollama pull ${model}`,
+    };
+  } catch {
+    return {
+      available: false,
+      modelInstalled: false,
+      model,
+      endpoint: ENDPOINT,
+      models: [],
+      message: `Cannot reach Ollama at ${ENDPOINT}. Start Ollama and run: ollama pull ${model}`,
+    };
+  }
+}
+
+module.exports = { MODEL, ENDPOINT, getSourceContext, parseVerdict, verifyFinding, reviewFindings, checkAiHealth };

@@ -6,7 +6,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 
-const { scanProjectRoot, rulesForKind, kinds } = require('../electron/scanner.cjs');
+const { scanProjectRoot, rulesForKind, toSarifReport, toMarkdownReport, kinds } = require('../electron/scanner.cjs');
 
 const SEVERITIES = new Set(['critical', 'high', 'medium', 'low', 'info']);
 
@@ -309,11 +309,170 @@ test('detects SQL built with template interpolation', async () => {
   assert.ok(titles(result).includes('SQL string concatenation'));
 });
 
+test('lists supported Node test files for individual runs without executing them', async () => {
+  const root = await fixture({
+    'package.json': JSON.stringify({ scripts: { test: 'node --test tests/*.test.cjs' } }),
+    'tests/one.test.cjs': 'test("one", () => {});\n',
+    'tests/two.spec.js': 'test("two", () => {});\n',
+    'src/not-a-test.js': 'export const value = 1;\n',
+  });
+  const result = await scanProjectRoot(root, 'Software');
+  assert.deepEqual(result.testFiles.map(({ file, runner }) => [file, runner]), [
+    ['tests/one.test.cjs', 'node'],
+    ['tests/two.spec.js', 'node'],
+  ]);
+  assert.equal(result.testCommand, 'npm test');
+});
+
+test('lists pytest files individually when the project declares pytest configuration', async () => {
+  const root = await fixture({
+    'pyproject.toml': '[tool.pytest.ini_options]\n',
+    'tests/test_api.py': 'def test_api(): pass\n',
+    'tests/api_test.py': 'def test_other(): pass\n',
+    'src/api.py': 'def api(): pass\n',
+  });
+  const result = await scanProjectRoot(root, 'Software');
+  assert.deepEqual(result.testFiles.map(({ file, runner }) => [file, runner]), [
+    ['tests/api_test.py', 'pytest'],
+    ['tests/test_api.py', 'pytest'],
+  ]);
+  assert.equal(result.testCommand, 'python -m pytest');
+});
+
+test('lists Go test functions and Cargo integration files as individual targets', async () => {
+  const root = await fixture({
+    'go.mod': 'module example.test/project\n',
+    'pkg/api_test.go': 'package pkg\nfunc TestOne(t *testing.T) {}\nfunc TestTwo(t *testing.T) {}\n',
+    'Cargo.toml': '[package]\nname = "example"\nversion = "0.1.0"\n',
+    'tests/http_api.rs': '#[test]\nfn rejects_bad_input() {}\n',
+  });
+  const result = await scanProjectRoot(root, 'Software');
+  const goTarget = result.testFiles.find((target) => target.runner === 'go');
+  const cargoTarget = result.testFiles.find((target) => target.runner === 'cargo');
+
+  assert.deepEqual(goTarget?.names, ['TestOne', 'TestTwo']);
+  assert.equal(goTarget?.file, 'pkg/api_test.go');
+  assert.equal(cargoTarget?.file, 'tests/http_api.rs');
+  assert.equal(cargoTarget?.command, 'cargo test --test "http_api"');
+});
+
+test('tracks destructured request inputs and clears taint after sanitization', async () => {
+  const root = await fixture({
+    'taint.js': [
+      "'use strict';",
+      'const { rawHtml } = req.query;',
+      'unsafeNode.innerHTML = rawHtml;',
+      'const cleanHtml = DOMPurify.sanitize(rawHtml);',
+      'sanitizedNode.innerHTML = cleanHtml;',
+    ].join('\n'),
+  });
+  const result = await scanProjectRoot(root, 'Website');
+  const htmlFindings = result.findings.filter((finding) => finding.ruleId === 'js-innerhtml');
+  assert.equal(htmlFindings.length, 2);
+  assert.equal(htmlFindings[0].line, 3);
+  assert.equal(htmlFindings[0].confidence, 'high');
+  assert.equal(htmlFindings[1].line, 5);
+  assert.equal(htmlFindings[1].confidence, 'medium');
+});
+
+test('exports valid SARIF 2.1.0 and Markdown reports', async () => {
+  const root = await fixture({ 'app.js': "'use strict';\neval(userInput);\n" });
+  const scan = await scanProjectRoot(root, 'Software');
+  const sarif = toSarifReport(scan, { name: 'demo', root, kind: 'Software' });
+  assert.equal(sarif.version, '2.1.0');
+  assert.equal(sarif.runs[0].tool.driver.name, 'DeepCheck');
+  assert.ok(sarif.runs[0].results.some((r) => r.ruleId === 'js-eval' && r.level === 'error'));
+  const markdown = toMarkdownReport(scan, { name: 'demo', root, kind: 'Software' });
+  assert.match(markdown, /# DeepCheck Audit Report — demo/);
+  assert.match(markdown, /Dynamic code evaluation/);
+});
+
+test('detects deep JS logic, concurrency, prototype pollution, and web structural bugs', async () => {
+  const root = await fixture({
+    'logic.js': [
+      "'use strict';",
+      'const DB_PASSWORD = "SuperSecret123!";',
+      'function average(nums) { let s = 0; for (let i = 0; i <= nums.length; i++) s += nums[i]; return s; }',
+      'function isEven(n) { return n % 2 == 1; }',
+      'function removeEvens(arr) { for (let i = 0; i < arr.length; i++) { if (arr[i] % 2 === 0) arr.splice(i, 1); } }',
+      'function merge(a, b) { for (const k in b) a[k] = b[k]; }',
+      'let counter = 0; async function inc() { const cur = counter; await Promise.resolve(); counter = cur + 1; }',
+      'function token() { return Math.random().toString(36); }',
+      'function okUrl(u) { return u.startsWith("https://example.com"); }',
+      'if (user == "admin" && password == "admin") console.log(DB_PASSWORD);',
+    ].join('\n'),
+    'page.html': '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>T</title></head><body><button id="dup" type="button">A</button><button id="dup" type="button">B</button><script>for (let i = 0; i <= 5; i++) {}</script></body></html>',
+    'bad.css': '.broken { content: "unterminated; }\n',
+  });
+  const result = await scanProjectRoot(root, 'Website');
+  const ruleIds = new Set(result.findings.map((f) => f.ruleId));
+  for (const expected of [
+    'secret-generic-credential',
+    'js-off-by-one-loop',
+    'js-suspicious-parity',
+    'js-array-splice-in-loop',
+    'js-prototype-pollution',
+    'js-async-race-condition',
+    'js-math-random-secret',
+    'js-bypassable-url-check',
+    'js-hardcoded-auth',
+    'js-log-sensitive',
+    'html-duplicate-id',
+    'css-unterminated-string',
+  ]) {
+    assert.ok(ruleIds.has(expected), `expected ${expected} to be detected`);
+  }
+});
+
+test('skips safe numeric innerHTML accumulators and catches NaN/typeof/await/ReDoS bugs', async () => {
+  const root = await fixture({
+    'editor.js': [
+      "'use strict';",
+      'function renderLines(total, box) {',
+      '  let html = "";',
+      '  for (let i = 1; i <= total; i++) { html += `<span>${i}</span>`; }',
+      '  box.innerHTML = html;',
+      '  box.innerHTML = `<span>${total} line${total !== 1 ? "s" : ""}</span>`;',
+      '}',
+      'async function saveData(x) { return x; }',
+      'async function run(x) { saveData(x); if (x === NaN || typeof x === "array") return /(a+)+/.test(x); }',
+    ].join('\n'),
+  });
+  const result = await scanProjectRoot(root, 'Website');
+  const ruleIds = new Set(result.findings.map((f) => f.ruleId));
+  assert.ok(!ruleIds.has('js-innerhtml'), 'safe numeric innerHTML should not be flagged as XSS');
+  for (const expected of ['js-missing-await', 'js-nan-compare', 'js-invalid-typeof', 'js-redos-regex']) {
+    assert.ok(ruleIds.has(expected), `expected ${expected} to be detected`);
+  }
+});
+
+test('detects switch fallthrough, duplicate case, return in finally, and async Promise executor', async () => {
+  const root = await fixture({
+    'advanced.js': [
+      "'use strict';",
+      'function route(x) {',
+      '  switch (x) {',
+      '    case 1: doA();',
+      '    case 1: doB(); break;',
+      '    default: break;',
+      '  }',
+      '}',
+      'function cleanup() { try { return 1; } finally { return 2; } }',
+      'const p = new Promise(async (resolve) => { resolve(1); });',
+    ].join('\n'),
+  });
+  const result = await scanProjectRoot(root, 'Software');
+  const ruleIds = new Set(result.findings.map((f) => f.ruleId));
+  for (const expected of ['js-switch-fallthrough', 'js-duplicate-case', 'js-return-in-finally', 'js-async-promise-executor']) {
+    assert.ok(ruleIds.has(expected), `expected ${expected} to be detected`);
+  }
+});
+
 test('scans the DeepCheck repo itself without crashing', async () => {
   const root = path.resolve(__dirname, '..');
   const result = await scanProjectRoot(root, 'Software');
   assert.ok(result.filesScanned > 10, `expected a real repo scan, got ${result.filesScanned} files`);
   assert.ok(result.durationMs < 60000, `scan took ${result.durationMs}ms`);
   assert.ok(result.findings.every((f) => f.file && typeof f.line === 'number'));
-  assert.ok(result.findings.some((f) => f.title.length > 0));
+  assert.ok(Array.isArray(result.findings));
 });

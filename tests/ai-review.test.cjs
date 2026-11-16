@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { parseVerdict, getSourceContext, verifyFinding, reviewFindings, MODEL } = require('../electron/ai-review.cjs');
+const { parseVerdict, getSourceContext, verifyFinding, reviewFindings, checkAiHealth, MODEL } = require('../electron/ai-review.cjs');
 
 test('validates supported JSON verdicts and bounds fields', () => {
   const parsed = parseVerdict(JSON.stringify({ verdict: 'likely_real', confidence: 150, rationale: 'Evidence found', evidence: 'line 2' }));
@@ -48,7 +48,6 @@ test('sends a local CPU-only Ollama request and parses response', async (t) => {
   });
   assert.equal(request.url, 'http://127.0.0.1:11434/api/chat');
   assert.equal(request.body.model, MODEL);
-  assert.equal(request.body.options.num_gpu, 0);
   assert.equal(request.body.options.temperature, 0);
   assert.equal(request.body.think, false);
   assert.equal(result.verdict, 'uncertain');
@@ -82,4 +81,42 @@ test('automatically reviews findings in separate fresh, snippet-only requests', 
   assert.match(requests[1].messages[1].content, /secondMarker/);
   assert.doesNotMatch(requests[1].messages[1].content, /firstMarker/);
   assert.ok(findings.every((finding) => finding.aiAssessment.confidence === 50));
+});
+
+test('circuit-breaks remaining findings when local Ollama endpoint is offline', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'deepcheck-ai-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  await fs.writeFile(path.join(root, 'app.js'), 'const a = 1;\nconst b = 2;\nconst c = 3;\n');
+  const findings = [
+    { file: 'app.js', line: 1, title: 'One' },
+    { file: 'app.js', line: 2, title: 'Two' },
+    { file: 'app.js', line: 3, title: 'Three' },
+  ];
+  let calls = 0;
+  const summary = await reviewFindings(root, findings, {
+    fetch: async () => {
+      calls++;
+      throw new Error('ECONNREFUSED');
+    },
+  });
+  assert.equal(calls, 1, 'stops calling unreachable endpoint after first connection failure');
+  assert.deepEqual(summary, { reviewed: 0, failed: 3 });
+  assert.ok(findings.every((f) => /Cannot reach Ollama/.test(f.aiReviewError)));
+});
+
+test('checkAiHealth reports online and model installation status', async () => {
+  const online = await checkAiHealth({
+    fetch: async () => ({
+      ok: true,
+      json: async () => ({ models: [{ name: MODEL }] }),
+    }),
+  });
+  assert.equal(online.available, true);
+  assert.equal(online.modelInstalled, true);
+
+  const offline = await checkAiHealth({
+    fetch: async () => { throw new Error('offline'); },
+  });
+  assert.equal(offline.available, false);
+  assert.equal(offline.modelInstalled, false);
 });

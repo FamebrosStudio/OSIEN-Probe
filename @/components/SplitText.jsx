@@ -94,6 +94,8 @@ const SplitText = ({
     let active = true;
     document.fonts.ready.then(() => {
       if (active) setFontsLoaded(true);
+    }).catch(() => {
+      if (active) setFontsLoaded(true);
     });
     return () => {
       active = false;

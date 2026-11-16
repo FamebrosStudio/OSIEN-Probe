@@ -16,6 +16,19 @@
     "dist": "npm run build && electron-builder --win nsis"
   },
   "dependencies": {
+    "@ast-grep/lang-bash": "^0.0.8",
+    "@ast-grep/lang-cpp": "^0.0.6",
+    "@ast-grep/lang-csharp": "^0.0.6",
+    "@ast-grep/lang-go": "^0.0.6",
+    "@ast-grep/lang-java": "^0.0.7",
+    "@ast-grep/lang-kotlin": "^0.0.7",
+    "@ast-grep/lang-php": "^0.0.7",
+    "@ast-grep/lang-python": "^0.0.6",
+    "@ast-grep/lang-ruby": "^0.0.7",
+    "@ast-grep/lang-rust": "^0.0.7",
+    "@ast-grep/lang-swift": "^0.0.8",
+    "@ast-grep/napi": "^0.51.2",
+    "@babel/parser": "^7.29.14",
     "@gsap/react": "^2.1.2",
     "gsap": "^3.15.1",
     "lucide-react": "^1.71.0",
@@ -40,6 +53,9 @@
   "build": {
     "appId": "dev.deepcheck.desktop",
     "productName": "DeepCheck",
+    "asarUnpack": [
+      "node_modules/@ast-grep/lang-*/prebuilds/prebuild-Windows-X64/parser.so"
+    ],
     "files": [
       "dist/**/*",
       "electron/**/*"
