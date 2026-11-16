@@ -1,5 +1,5 @@
 {
-  "name": "deepcheck",
+  "name": "osien-probe",
   "private": true,
   "version": "1.0.1",
   "description": "Local static analysis, multi-language AST bug finder, and AI-assisted finding reviewer.",
