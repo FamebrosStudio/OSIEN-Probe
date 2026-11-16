@@ -484,6 +484,26 @@ test('detects unbounded recursion, empty promise catch, and sparse array holes',
   }
 });
 
+test('detects negated in/instanceof precedence, unawaited condition, throw literal, and /g regex in loop', async () => {
+  const root = await fixture({
+    'precedence.js': [
+      "'use strict';",
+      'async function checkAuth() { return true; }',
+      'function inspect(k, obj, s) {',
+      '  if (!k in obj) return false;',
+      '  if (checkAuth()) return true;',
+      '  while (/a/g.test(s)) { break; }',
+      '  throw "bad input";',
+      '}',
+    ].join('\n'),
+  });
+  const result = await scanProjectRoot(root, 'Software');
+  const ruleIds = new Set(result.findings.map((f) => f.ruleId));
+  for (const expected of ['js-negated-in-instanceof', 'js-promise-in-condition', 'js-global-regex-in-loop', 'js-throw-literal']) {
+    assert.ok(ruleIds.has(expected), `expected ${expected} to be detected`);
+  }
+});
+
 test('scans the DeepCheck repo itself without crashing', async () => {
   const root = path.resolve(__dirname, '..');
   const result = await scanProjectRoot(root, 'Software');

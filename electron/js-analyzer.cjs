@@ -577,6 +577,56 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       }, node, 'high', 'Errors thrown inside an async Promise executor are not caught by the Promise.');
     }
 
+    // Operator precedence bug: !x in obj or !x instanceof Class.
+    if (node.type === 'BinaryExpression' && (node.operator === 'in' || node.operator === 'instanceof')
+      && node.left?.type === 'UnaryExpression' && node.left.operator === '!' && !node.left.extra?.parenthesized) {
+      emit({
+        id: 'js-negated-in-instanceof',
+        title: `Negation precedence bug with "${node.operator}"`,
+        severity: 'high',
+        cwe: 'CWE-783',
+        hint: `Wrap the expression in parentheses: !(x ${node.operator} y).`,
+      }, node, 'high', `"!x ${node.operator} y" is parsed as "(!x) ${node.operator} y", not "!(x ${node.operator} y)".`);
+    }
+
+    // Promise returned by known async function used directly in if/while condition without await.
+    if ((node.type === 'IfStatement' || node.type === 'WhileStatement') && node.test?.type === 'CallExpression'
+      && node.test.callee?.type === 'Identifier' && asyncFnNames.has(node.test.callee.name)) {
+      emit({
+        id: 'js-promise-in-condition',
+        title: `Async function "${node.test.callee.name}()" tested without await`,
+        severity: 'high',
+        cwe: 'CWE-480',
+        hint: `Add "await" before ${node.test.callee.name}(); a Promise object is always truthy.`,
+      }, node.test, 'high', `Calling async "${node.test.callee.name}()" without await returns a Promise, which is always truthy.`);
+    }
+
+    // Throwing a string/number literal instead of an Error object loses stack trace.
+    if (node.type === 'ThrowStatement' && (node.argument?.type === 'StringLiteral' || node.argument?.type === 'NumericLiteral' || node.argument?.type === 'TemplateLiteral')) {
+      emit({
+        id: 'js-throw-literal',
+        title: 'Throwing a primitive literal instead of Error',
+        severity: 'low',
+        cwe: 'CWE-397',
+        hint: 'Throw new Error(...) so callers receive a stack trace and Error instance.',
+      }, node, 'high', 'Throwing a non-Error literal omits the stack trace.');
+    }
+
+    // Stateful /g RegExp literal tested inside a loop.
+    if ((node.type === 'WhileStatement' || node.type === 'ForStatement') && node.test) {
+      walkSubtree(node.test, (sub) => {
+        if (sub.type === 'CallExpression' && memberName(sub.callee) === 'test' && sub.callee?.object?.type === 'RegExpLiteral' && sub.callee.object.flags?.includes('g')) {
+          emit({
+            id: 'js-global-regex-in-loop',
+            title: 'Stateful /g RegExp.test() in loop condition',
+            severity: 'medium',
+            cwe: 'CWE-670',
+            hint: 'Remove the /g flag from .test() or reset lastIndex; /g mutates lastIndex on every call.',
+          }, sub, 'high', 'RegExp with /g flag advances lastIndex on each .test() call, causing alternating misses.');
+        }
+      });
+    }
+
     // Constant condition in if statement.
     if (node.type === 'IfStatement' && (node.test?.type === 'BooleanLiteral' || node.test?.type === 'NumericLiteral' || node.test?.type === 'StringLiteral')) {
       emit({

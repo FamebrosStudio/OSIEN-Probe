@@ -41,6 +41,8 @@ const rules = [
   { lang: 'python', pattern: 'requests.get($URL)', id: 'polyglot-python-requests-timeout', title: 'HTTP request without timeout', severity: 'low', cwe: 'CWE-400', hint: 'Pass timeout=... so hung upstreams cannot stall the worker indefinitely.' },
   { lang: 'python', pattern: 'requests.post($URL)', id: 'polyglot-python-requests-timeout', title: 'HTTP request without timeout', severity: 'low', cwe: 'CWE-400', hint: 'Pass timeout=... so hung upstreams cannot stall the worker indefinitely.' },
   { lang: 'python', pattern: 'assert ($A, $B)', id: 'polyglot-python-assert-tuple', title: 'Assert on non-empty tuple (always true)', severity: 'high', cwe: 'CWE-670', hint: 'Remove the parentheses: "assert cond, msg" instead of "assert (cond, msg)".' },
+  { lang: 'python', pattern: '$X is "$S"', id: 'polyglot-python-is-literal', title: 'Identity check (is) against string literal', severity: 'medium', cwe: 'CWE-595', hint: 'Use == for value equality; "is" checks object identity and fails unpredictably.' },
+  { lang: 'python', pattern: 'except Exception:\n    pass', id: 'polyglot-python-except-pass', title: 'Silent broad exception swallow', severity: 'medium', cwe: 'CWE-390', hint: 'Log or handle the exception instead of swallowing all Exception types.' },
   { lang: 'go', pattern: 'exec.Command("sh", "-c", $CMD)', id: 'polyglot-go-shell', title: 'Shell command execution', severity: 'high', cwe: 'CWE-78', hint: 'Avoid invoking a shell with dynamically assembled commands.' },
   { lang: 'go', pattern: 'exec.Command("bash", "-c", $CMD)', id: 'polyglot-go-shell', title: 'Shell command execution', severity: 'high', cwe: 'CWE-78', hint: 'Avoid invoking a shell with dynamically assembled commands.' },
   { lang: 'go', pattern: 'template.HTML($A)', id: 'polyglot-go-html', title: 'Unescaped HTML rendering', severity: 'high', cwe: 'CWE-79', hint: 'Do not convert untrusted strings to trusted HTML.' },
@@ -75,6 +77,7 @@ const rules = [
   { lang: 'cpp', pattern: 'strcpy($A, $B)', id: 'polyglot-cpp-copy', title: 'Unbounded C++ string copy', severity: 'medium', cwe: 'CWE-120', hint: 'Use a bounds-checked copy and validate destination capacity.' },
   { lang: 'cpp', pattern: 'strcat($A, $B)', id: 'polyglot-cpp-strcat', title: 'Unbounded C++ string concatenation', severity: 'medium', cwe: 'CWE-120', hint: 'Use bounded string concatenation and verify buffer capacity.' },
   { lang: 'cpp', pattern: 'sprintf($BUF, $$$)', id: 'polyglot-cpp-sprintf', title: 'Unbounded C/C++ sprintf', severity: 'high', cwe: 'CWE-120', hint: 'Use snprintf with explicit buffer size.' },
+  { lang: 'cpp', pattern: 'scanf("%s", $BUF)', id: 'polyglot-cpp-scanf', title: 'Unbounded C/C++ scanf("%s")', severity: 'high', cwe: 'CWE-120', hint: 'Specify a field width limit or use fgets to prevent stack buffer overflow.' },
   { lang: 'cpp', pattern: 'system($CMD)', id: 'polyglot-cpp-system', title: 'C/C++ shell command execution', severity: 'high', cwe: 'CWE-78', hint: 'Avoid system(); invoke an executable directly without a shell.' },
   { lang: 'csharp', pattern: 'new BinaryFormatter()', id: 'polyglot-csharp-binaryformatter', title: 'Unsafe .NET binary formatter', severity: 'high', cwe: 'CWE-502', hint: 'Replace BinaryFormatter with a safe, constrained format.' },
   { lang: 'csharp', pattern: 'new LosFormatter()', id: 'polyglot-csharp-losformatter', title: 'Unsafe .NET LosFormatter', severity: 'high', cwe: 'CWE-502', hint: 'Avoid LosFormatter on untrusted payloads.' },
@@ -87,6 +90,12 @@ const rules = [
 ];
 
 let registered = false;
+const rulesByLang = new Map();
+for (const rule of rules) {
+  const list = rulesByLang.get(rule.lang) || [];
+  list.push(rule);
+  rulesByLang.set(rule.lang, list);
+}
 
 function ensureParsers() {
   if (registered) return;
@@ -139,8 +148,7 @@ function analyzePolyglot(source, file, extension, suppressions) {
       excerpt: String(lines[line - 1] || error.text()).trim().slice(0, 220),
     });
   }
-  for (const rule of rules) {
-    if (rule.lang !== language) continue;
+  for (const rule of (rulesByLang.get(language) || [])) {
     let matches;
     try {
       matches = language === 'php'

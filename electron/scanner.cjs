@@ -579,16 +579,17 @@ async function discoverTestPlan(root) {
   };
 }
 
-function scanFileContent(raw, rel, extName, lang, catalog) {
+function scanFileContent(raw, rel, extName, lang, catalog, applicableByLang) {
   const findings = [];
-  const applicable = catalog.filter((rule) => appliesTo(rule, lang));
+  let applicable = applicableByLang?.get(lang);
+  if (!applicable) {
+    applicable = catalog.filter((rule) => appliesTo(rule, lang));
+    applicableByLang?.set(lang, applicable);
+  }
   const lines = raw.split(/\r?\n/);
-  const commentText = ['js', 'py', 'css', 'sh', 'sql', 'generic'].includes(lang)
-    ? stripComments(raw, lang)
-    : raw;
-  const codeText = ['js', 'py', 'css', 'sh', 'sql', 'generic'].includes(lang)
-    ? stripComments(raw, lang, true)
-    : raw;
+  const needsMasking = ['js', 'py', 'css', 'sh', 'sql', 'generic'].includes(lang);
+  const commentText = needsMasking ? stripComments(raw, lang) : raw;
+  const codeText = needsMasking ? maskCommentsThenStrings(commentText, lang, []) : raw;
   const commentLines = commentText.split(/\r?\n/);
   const codeLines = codeText.split(/\r?\n/);
   const suppressions = suppressionMap(lines);
@@ -727,6 +728,7 @@ async function scanProjectRoot(root, kind, options = {}) {
 
   const findings = [];
   const languagesScanned = new Set();
+  const applicableByLang = new Map();
   let filesScanned = 0;
   let rulesEvaluated = 0;
   let truncated = false;
@@ -742,7 +744,7 @@ async function scanProjectRoot(root, kind, options = {}) {
       try { raw = await fs.readFile(full, 'utf8'); } catch { return null; }
       if (raw.includes('\u0000')) return null;
       const lang = langByExt[extName] || 'generic';
-      return { lang, ...scanFileContent(raw, rel, extName, lang, catalog) };
+      return { lang, ...scanFileContent(raw, rel, extName, lang, catalog, applicableByLang) };
     }));
 
     for (const item of batchResults) {
