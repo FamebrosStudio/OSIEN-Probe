@@ -17,6 +17,14 @@ type ContextLine = { number: number; text: string; isTarget: boolean }
 type SourceContext = { context: string; lines?: ContextLine[]; totalLines: number }
 type AiHealth = { available: boolean; modelInstalled: boolean; model: string; endpoint: string; models: string[]; message: string }
 type Route = 'Projects' | 'Test runs' | 'Findings' | 'Security' | 'Environments' | 'Settings'
+type ConfirmState = {
+  title: string
+  body: string
+  detail?: string
+  confirmLabel: string
+  tone: 'danger' | 'primary'
+  onConfirm: () => Promise<void> | void
+} | null
 type Bridge = {
   pickFolder(): Promise<string | null>
   listProjects(): Promise<Project[]>
@@ -77,6 +85,7 @@ function App() {
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
   const [help, setHelp] = useState(false)
   const [confirmClear, setConfirmClear] = useState(false)
+  const [confirmState, setConfirmState] = useState<ConfirmState>(null)
   const [aiHealth, setAiHealth] = useState<AiHealth | null>(null)
   const [reviews, setReviews] = useState<Record<string, ReviewProgress>>({})
 
@@ -86,6 +95,7 @@ function App() {
         setDialog(false)
         setHelp(false)
         setConfirmClear(false)
+        setConfirmState(null)
         setWorkspaceOpen(false)
         return
       }
@@ -195,33 +205,51 @@ function App() {
     }
   }
   const runTests = async (p: Project) => {
-    if (!p.latestRun?.testCommand || !window.confirm(`Run “${p.latestRun.testCommand}” in ${p.root}? This executes the project's code.`)) return
-    setBusy(`test:${p.id}`)
-    setMessage('')
-    try {
-      await bridge!.runProjectTests(p.id)
-      const fresh = await reload()
-      setSelectedProject(fresh.find(item => item.id === p.id) || null)
-      setRoute('Test runs')
-    } catch (e) {
-      setMessage(errorText(e))
-    } finally {
-      setBusy('')
-    }
+    if (!p.latestRun?.testCommand) return
+    const cmd = p.latestRun.testCommand
+    setConfirmState({
+      title: `Run ${p.name} test suite?`,
+      body: 'This executes the project’s own test script on this device.',
+      detail: `${cmd} · ${p.root}`,
+      confirmLabel: 'Run full suite',
+      tone: 'primary',
+      onConfirm: async () => {
+        setBusy(`test:${p.id}`)
+        setMessage('')
+        try {
+          await bridge!.runProjectTests(p.id)
+          const fresh = await reload()
+          setSelectedProject(fresh.find(item => item.id === p.id) || null)
+          setRoute('Test runs')
+        } catch (e) {
+          setMessage(errorText(e))
+        } finally {
+          setBusy('')
+        }
+      },
+    })
   }
   const runTestFile = async (p: Project, target: TestTarget) => {
-    if (!window.confirm(`Run test file “${target.file}” with ${target.command}? Test code can modify files or access the network.`)) return
-    setBusy(`testfile:${p.id}:${target.file}`)
-    setMessage('')
-    try {
-      await bridge!.runProjectTestFile({ projectId: p.id, file: target.file })
-      const fresh = await reload()
-      setSelectedProject(fresh.find(item => item.id === p.id) || null)
-    } catch (e) {
-      setMessage(errorText(e))
-    } finally {
-      setBusy('')
-    }
+    setConfirmState({
+      title: `Run ${target.file}?`,
+      body: 'Test code can modify files or access the network. Only run tests from projects you trust.',
+      detail: target.command,
+      confirmLabel: 'Run test file',
+      tone: 'primary',
+      onConfirm: async () => {
+        setBusy(`testfile:${p.id}:${target.file}`)
+        setMessage('')
+        try {
+          await bridge!.runProjectTestFile({ projectId: p.id, file: target.file })
+          const fresh = await reload()
+          setSelectedProject(fresh.find(item => item.id === p.id) || null)
+        } catch (e) {
+          setMessage(errorText(e))
+        } finally {
+          setBusy('')
+        }
+      },
+    })
   }
   const addProject = async () => {
     if (!kind) return
@@ -253,15 +281,23 @@ function App() {
       setBusy('')
     }
   }
-  const removeProject = async (p: Project) => {
-    if (!window.confirm(`Remove ${p.name} from DeepCheck? Its files will not be deleted.`)) return
-    try {
-      await bridge!.removeProject(p.id)
-      setProjects(await bridge!.listProjects())
-      if (selectedProject?.id === p.id) setSelectedProject(null)
-    } catch (e) {
-      setMessage(errorText(e))
-    }
+  const removeProject = (p: Project) => {
+    setConfirmState({
+      title: `Remove ${p.name} from OSIEN Probe?`,
+      body: 'OSIEN Probe will forget this connected project entry and its scan history. Your files on disk will not be deleted.',
+      detail: p.root,
+      confirmLabel: 'Remove project',
+      tone: 'danger',
+      onConfirm: async () => {
+        try {
+          await bridge!.removeProject(p.id)
+          setProjects(await bridge!.listProjects())
+          if (selectedProject?.id === p.id) setSelectedProject(null)
+        } catch (e) {
+          setMessage(errorText(e))
+        }
+      },
+    })
   }
   const clearProjects = async () => {
     for (const p of projects) await bridge!.removeProject(p.id)
@@ -478,12 +514,29 @@ function App() {
       </section>
     </div>}
     {help && <InfoDialog onClose={() => setHelp(false)}/>}
-    {confirmClear && <div className="overlay"><section className="dialog confirm-dialog">
-      <h2>Remove all projects?</h2>
-      <p>DeepCheck will forget connected project entries and scan results. It will not delete their folders.</p>
+    {confirmClear && <div className="overlay" onMouseDown={e => { if (e.target === e.currentTarget) setConfirmClear(false) }}><section className="dialog confirm-dialog">
+      <div className="dialog-brand"><img className="dialog-logo" src="./logo.png" alt="OSIEN Probe"/><div><h2>Remove all projects?</h2><p>OSIEN Probe will forget all connected entries and scan results.</p></div></div>
+      <p>Your folders and cloned repositories on disk will not be deleted.</p>
       <div className="dialog-foot">
         <button className="filter-button" onClick={() => setConfirmClear(false)}>Cancel</button>
         <button className="danger-button" onClick={() => void clearProjects()}>Remove all</button>
+      </div>
+    </section></div>}
+    {confirmState && <div className="overlay" onMouseDown={e => { if (e.target === e.currentTarget) setConfirmState(null) }}><section className="dialog confirm-dialog">
+      <div className="dialog-brand"><img className="dialog-logo" src="./logo.png" alt="OSIEN Probe"/><div><h2>{confirmState.title}</h2><p>{confirmState.body}</p></div></div>
+      {confirmState.detail && <code className="confirm-detail">{confirmState.detail}</code>}
+      <div className="dialog-foot">
+        <button className="filter-button" onClick={() => setConfirmState(null)}>Cancel</button>
+        <button
+          className={confirmState.tone === 'danger' ? 'danger-button' : 'primary'}
+          onClick={() => {
+            const action = confirmState.onConfirm
+            setConfirmState(null)
+            void action()
+          }}
+        >
+          {confirmState.confirmLabel}
+        </button>
       </div>
     </section></div>}
   </div>

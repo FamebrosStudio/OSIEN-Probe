@@ -53,5 +53,8 @@
 .brand-logo{width:28px;height:28px;border-radius:7px;object-fit:cover;flex:none;border:1px solid #354132}
 .avatar-logo{width:100%;height:100%;border-radius:7px;object-fit:cover}
 .dialog-brand{display:flex;align-items:center;gap:12px}
+.dialog-brand h2{margin:0 0 4px;font-size:16px;font-weight:500;color:#e5e7e4}
+.dialog-brand p{margin:0;font-size:11px;color:#8c918d;line-height:1.45}
 .dialog-logo{width:38px;height:38px;border-radius:8px;object-fit:cover;border:1px solid #354132;flex:none}
+.confirm-detail{display:block;margin-top:14px;padding:9px 11px;border:1px solid #2b2e2c;border-radius:6px;background:#111212;color:#b8c7ad;font:10px/1.5 'IBM Plex Mono',monospace;overflow-wrap:anywhere}
 @media(max-width:650px){.page-heading{align-items:flex-start;gap:14px;flex-direction:column}.heading-actions{width:100%}.test-action{align-items:flex-start;flex-direction:column}.test-action button{align-self:flex-start}.test-file-row{grid-template-columns:1fr auto}.test-file-row>span{grid-column:1}}
