@@ -4,8 +4,17 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 
 const MODEL = 'qwen3.5:0.8b';
-const PREFERRED_CODING_MODELS = ['qwen2.5-coder:1.5b', 'qwen2.5-coder:0.5b', 'qwen3.5:0.8b', 'qwen3:0.6b'];
-const ENDPOINT = 'http://127.0.0.1:11434/api/chat';
+const PREFERRED_CODING_MODELS = [
+  'qwen2.5-coder:1.5b',
+  'qwen2.5-coder:0.5b',
+  'lfm2.5',
+  'lfm2.5:1.2b',
+  'qwen3.5:0.8b',
+  'qwen3:0.6b',
+  'gemma3:1b',
+  'smollm2:1.7b',
+];
+const ENDPOINT = process.env.OSIEN_AI_ENDPOINT || 'http://127.0.0.1:11434/api/chat';
 const CONTEXT_RADIUS = 4;
 const MAX_CONTEXT_CHARS = 3000;
 const VERDICT_SCHEMA = {
@@ -88,23 +97,35 @@ async function verifyFinding(root, finding, options = {}) {
   ].join('\n');
 
   let response;
+  const isOpenAiCompat = /\/v1\/chat\/completions$/.test(endpoint);
+  const requestBody = isOpenAiCompat
+    ? {
+      model,
+      temperature: 0,
+      max_tokens: 160,
+      messages: [
+        { role: 'system', content: 'Assess static-analysis findings conservatively. Never edit code. Return valid JSON only.' },
+        { role: 'user', content: prompt },
+      ],
+    }
+    : {
+      model,
+      stream: false,
+      format: VERDICT_SCHEMA,
+      think: false,
+      keep_alive: '5m',
+      messages: [
+        { role: 'system', content: 'Assess static-analysis findings conservatively. Never edit code. Return valid JSON only.' },
+        { role: 'user', content: prompt },
+      ],
+      options: { temperature: 0, num_ctx: 1024, num_predict: 160 },
+    };
   try {
     response = await fetchImpl(endpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       signal: AbortSignal.timeout(options.timeoutMs || 60000),
-      body: JSON.stringify({
-        model,
-        stream: false,
-        format: VERDICT_SCHEMA,
-        think: false,
-        keep_alive: '5m',
-        messages: [
-          { role: 'system', content: 'Assess static-analysis findings conservatively. Never edit code. Return valid JSON only.' },
-          { role: 'user', content: prompt },
-        ],
-        options: { temperature: 0, num_ctx: 1024, num_predict: 160 },
-      }),
+      body: JSON.stringify(requestBody),
     });
   } catch (error) {
     if (error.name === 'TimeoutError' || error.name === 'AbortError') throw new Error('Local AI review timed out. Try again or use fewer concurrent apps.');
@@ -116,7 +137,8 @@ async function verifyFinding(root, finding, options = {}) {
     throw new Error(`Ollama returned HTTP ${response.status}: ${body.slice(0, 240)}`);
   }
   const result = await response.json();
-  return parseVerdict(result.message?.content, model);
+  const content = isOpenAiCompat ? result.choices?.[0]?.message?.content : result.message?.content;
+  return parseVerdict(content, model);
 }
 
 async function reviewFindings(root, findings, options = {}) {
