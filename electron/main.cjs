@@ -24,13 +24,13 @@ if (process.versions.electron && typeof ipcMain?.handle === 'function') {
 // IPC handlers remain registered only in the app process; tests call scanProjectRoot directly.
 ipc('pick-folder', async () => { const result = await dialog.showOpenDialog({ properties: ['openDirectory'] }); return result.canceled ? null : result.filePaths[0]; });
 ipc('list-projects', readProjects);
-async function persistProject(rootPath, kind) {
+async function persistProject(rootPath, kind, displayName) {
   if (!kinds.includes(kind)) throw new Error('Choose a project category');
   const root = path.resolve(rootPath); const stat = await fs.stat(root).catch(() => null);
   if (!stat?.isDirectory()) throw new Error('The selected folder no longer exists');
   const projects = await readProjects();
   if (projects.some(p => path.resolve(p.root).toLowerCase() === root.toLowerCase())) throw new Error('This project is already connected');
-  const project = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, name: path.basename(root), root, kind, addedAt: new Date().toISOString(), latestRun: null, scanHistory: [] };
+  const project = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, name: displayName || path.basename(root), root, kind, addedAt: new Date().toISOString(), latestRun: null, scanHistory: [] };
   projects.unshift(project); await saveProjects(projects); return project;
 }
 ipc('add-project', async (_event, payload) => {
@@ -54,10 +54,12 @@ ipc('clone-repo', async (_event, payload) => {
   await ensureGit();
   const url = payload?.url;
   if (typeof url !== 'string' || !/^https:\/\/(github\.com|gitlab\.com|bitbucket\.org)\/[\w.-]+\/[\w.-]+(?:\.git)?$/.test(url)) throw new Error('Enter a public GitHub, GitLab, or Bitbucket repository URL');
-  const target = path.join(app.getPath('userData'), 'repositories', `${Date.now()}`); await fs.mkdir(path.dirname(target), { recursive: true });
+  const repoName = url.replace(/\.git$/i, '').split('/').pop() || 'repository';
+  const safeFolder = `${repoName.replace(/[^A-Za-z0-9._-]/g, '-')}-${Date.now()}`;
+  const target = path.join(app.getPath('userData'), 'repositories', safeFolder); await fs.mkdir(path.dirname(target), { recursive: true });
   try { await execFileAsync('git', ['clone', '--depth', '1', url, target], { timeout: 120000, windowsHide: true }); }
   catch (error) { throw new Error(`Git clone failed: ${error.stderr || error.message}`); }
-  return persistProject(target, payload.kind);
+  return persistProject(target, payload.kind, repoName);
 });
 ipc('remove-project', async (_event, id) => { const projects = await readProjects(); const index = projects.findIndex(p => p.id === id); if (index < 0) throw new Error('Project not found'); const [removed] = projects.splice(index, 1); await saveProjects(projects); return removed; });
 ipc('open-data-folder', async () => { const error = await shell.openPath(app.getPath('userData')); if (error) throw new Error(error); return true; });
