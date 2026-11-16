@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('deepcheck', {
   verifyFinding: (payload) => ipcRenderer.invoke('verify-finding', payload),
   getFindingContext: (payload) => ipcRenderer.invoke('get-finding-context', payload),
   checkAiStatus: () => ipcRenderer.invoke('check-ai-status'),
+  listRules: () => ipcRenderer.invoke('list-rules'),
   exportReport: (payload) => ipcRenderer.invoke('export-report', payload),
   runProjectTests: (id) => ipcRenderer.invoke('run-project-tests', id),
   runProjectTestFile: (payload) => ipcRenderer.invoke('run-project-test-file', payload),

@@ -16,7 +16,9 @@ type Project = { id: string; name: string; root: string; kind: Kind; addedAt: st
 type ContextLine = { number: number; text: string; isTarget: boolean }
 type SourceContext = { context: string; lines?: ContextLine[]; totalLines: number }
 type AiHealth = { available: boolean; modelInstalled: boolean; model: string; endpoint: string; models: string[]; message: string }
-type Route = 'Projects' | 'Test runs' | 'Findings' | 'Security' | 'Environments' | 'Settings'
+type Route = 'Projects' | 'Test runs' | 'Findings' | 'Security' | 'Rule catalog' | 'Environments' | 'Settings'
+type CatalogRule = { id: string; title: string; severity: string; cwe: string; lang: string; category: string; hint: string; bad: string; good: string }
+type CatalogPayload = { total: number; categories: string[]; rules: CatalogRule[] }
 type ConfirmState = {
   title: string
   body: string
@@ -37,6 +39,7 @@ type Bridge = {
   verifyFinding(p: { projectId: string; findingId: string }): Promise<AiAssessment>
   getFindingContext?(p: { projectId: string; findingId: string }): Promise<SourceContext>
   checkAiStatus?(): Promise<AiHealth>
+  listRules?(): Promise<CatalogPayload>
   exportReport?(p: { projectId?: string; format: 'sarif' | 'markdown' | 'json' }): Promise<{ saved: boolean; filePath: string | null }>
   runProjectTests(id: string): Promise<TestResult>
   runProjectTestFile(p: { projectId: string; file: string }): Promise<TestResult>
@@ -61,6 +64,7 @@ const nav: { name: Route; Icon: typeof Layers3 }[] = [
   { name: 'Test runs', Icon: Activity },
   { name: 'Findings', Icon: Bug },
   { name: 'Security', Icon: Shield },
+  { name: 'Rule catalog', Icon: ShieldCheck },
   { name: 'Environments', Icon: Terminal },
   { name: 'Settings', Icon: SlidersHorizontal },
 ]
@@ -88,6 +92,7 @@ function App() {
   const [confirmState, setConfirmState] = useState<ConfirmState>(null)
   const [aiHealth, setAiHealth] = useState<AiHealth | null>(null)
   const [reviews, setReviews] = useState<Record<string, ReviewProgress>>({})
+  const [catalog, setCatalog] = useState<CatalogPayload | null>(null)
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -251,6 +256,10 @@ function App() {
       },
     })
   }
+  useEffect(() => {
+    if (!bridge?.listRules) return
+    void bridge.listRules().then(setCatalog).catch((e) => setMessage(errorText(e)))
+  }, [bridge])
   const addProject = async () => {
     if (!kind) return
     setBusy('add')
@@ -305,6 +314,19 @@ function App() {
     setConfirmClear(false)
     setRoute('Projects')
   }
+  const scanAll = async () => {
+    if (!projects.length) return
+    setBusy('scan-all')
+    setMessage('')
+    try {
+      for (const p of projects) await bridge!.scanProject(p.id)
+      setProjects(await bridge!.listProjects())
+    } catch (e) {
+      setMessage(errorText(e))
+    } finally {
+      setBusy('')
+    }
+  }
   const navTo = (item: Route) => { setRoute(item); setPage(0); setMessage('') }
   const securityCount = findings.filter(f => ['critical', 'high'].includes(f.severity)).length
 
@@ -352,6 +374,15 @@ function App() {
       <header className="topbar">
         <div className="breadcrumbs">Local workspace <span>/</span> <b>{route}</b></div>
         <div className="top-actions">
+          <button
+            type="button"
+            className={`ai-pill ${aiHealth?.modelInstalled ? 'ai-pill-ready' : ''}`}
+            onClick={() => setRoute('Environments')}
+            title={aiHealth?.message || 'Inspect local AI engine status'}
+          >
+            <i/>
+            <span>{aiHealth?.modelInstalled ? `AI · ${aiHealth.model}` : 'Static engine'}</span>
+          </button>
           <button className="icon-button" aria-label="Help" onClick={() => setHelp(true)}><CircleHelp size={17}/></button>
           <span className="top-divider"/>
           <span className="local-indicator"><i/> On this device</span>
@@ -366,6 +397,7 @@ function App() {
           </div>
           <div className="heading-actions">
             {selectedProject && route === 'Test runs' && <button className="filter-button" onClick={() => setSelectedProject(null)}>Show all projects</button>}
+            {route === 'Projects' && projects.length > 1 && <button className="filter-button" onClick={() => void scanAll()} disabled={!!busy}><Play size={13}/> {busy === 'scan-all' ? 'Scanning all…' : 'Scan all'}</button>}
             <button className="filter-button" onClick={() => void refreshAll()} disabled={!!busy}><RefreshCw size={14} className={busy === 'refresh' ? 'spinning' : ''}/> Refresh data</button>
             {route === 'Projects' && <button className="primary" onClick={() => { setDialog(true); setMessage('') }}><Plus size={17}/> Add project</button>}
           </div>
@@ -451,6 +483,8 @@ function App() {
           />
         ) : route === 'Test runs' ? (
           <Runs projects={projects} selected={selectedProject} busy={busy} onScan={scan} onTest={runTests} onRunFile={runTestFile} onExport={exportReport}/>
+        ) : route === 'Rule catalog' ? (
+          <RuleCatalog catalog={catalog}/>
         ) : route === 'Environments' ? (
           <Environments projects={projects} aiHealth={aiHealth} onCheckAi={refreshAll} onOpen={p => void bridge!.openProject(p.id)} onTest={runTests} busy={busy}/>
         ) : (
@@ -685,6 +719,11 @@ function FindingList({
         <option value="uncertain">Uncertain (50/50)</option>
         <option value="unreviewed">Unreviewed</option>
       </select>
+      {(query || projectFilter !== 'All projects' || severityFilter !== 'All severities' || confidenceFilter !== 'All confidence' || verdictFilter !== 'All verdicts') && (
+        <button className="filter-button" onClick={() => { setQuery(''); setProjectFilter('All projects'); setSeverityFilter('All severities'); setConfidenceFilter('All confidence'); setVerdictFilter('All verdicts') }}>
+          Clear filters
+        </button>
+      )}
     </div>}
     {filtered.map(f => {
       const project = projects.find(item => item.id === f.projectId)
@@ -919,8 +958,91 @@ function InfoDialog({ onClose }: { onClose(): void }) {
         <p><strong>Run tests</strong> starts a detected project test command only after you confirm. Test scripts can execute arbitrary code, so only run scripts from projects you trust.</p>
         <p>Source code is not uploaded. Review requests go only to local Ollama.</p>
       </div>
-      <div className="dialog-foot"><span>DeepCheck · Local analysis</span><button className="primary" onClick={onClose}>Close</button></div>
+      <div className="dialog-foot"><span>OSIEN Probe · Local analysis</span><button className="primary" onClick={onClose}>Close</button></div>
     </section>
+  </div>
+}
+
+function RuleCatalog({ catalog }: { catalog: CatalogPayload | null }) {
+  const [query, setQuery] = useState('')
+  const [catFilter, setCatFilter] = useState('All')
+  const [sevFilter, setSevFilter] = useState('All')
+  const [langFilter, setLangFilter] = useState('All')
+  const [limit, setLimit] = useState(60)
+
+  const rules = useMemo(() => catalog?.rules || [], [catalog])
+  const langs = useMemo(() => ['All', ...Array.from(new Set(rules.map(r => r.lang))).sort()], [rules])
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return rules.filter(r => {
+      if (catFilter !== 'All' && r.category !== catFilter) return false
+      if (sevFilter !== 'All' && r.severity !== sevFilter) return false
+      if (langFilter !== 'All' && r.lang !== langFilter) return false
+      if (!q) return true
+      return `${r.id} ${r.title} ${r.cwe} ${r.lang} ${r.category} ${r.hint}`.toLowerCase().includes(q)
+    })
+  }, [rules, query, catFilter, sevFilter, langFilter])
+
+  const shown = filtered.slice(0, limit)
+
+  return <div className="detail-panel">
+    <div className="detail-summary">
+      <span>
+        {catalog
+          ? `${filtered.length} of ${catalog.total} catalog rules shown · plus Babel JS/TS AST & 11-language Tree-sitter AST checks`
+          : 'Loading rule catalog…'}
+      </span>
+      <span className="catalog-badge">100% local · Zero telemetry</span>
+    </div>
+    <div className="triage-bar">
+      <label className="search triage-search">
+        <Search size={14}/>
+        <input aria-label="Search rules" placeholder="Search rules by ID, CWE, title, or hint…" value={query} onChange={e => { setQuery(e.target.value); setLimit(60) }}/>
+      </label>
+      <select className="filter-button" aria-label="Filter rules by category" value={catFilter} onChange={e => { setCatFilter(e.target.value); setLimit(60) }}>
+        <option value="All">All categories</option>
+        {(catalog?.categories || []).map(c => <option key={c} value={c}>{c}</option>)}
+      </select>
+      <select className="filter-button" aria-label="Filter rules by severity" value={sevFilter} onChange={e => { setSevFilter(e.target.value); setLimit(60) }}>
+        <option value="All">All severities</option>
+        <option value="critical">Critical</option>
+        <option value="high">High</option>
+        <option value="medium">Medium</option>
+        <option value="low">Low</option>
+        <option value="info">Info</option>
+      </select>
+      <select className="filter-button" aria-label="Filter rules by language" value={langFilter} onChange={e => { setLangFilter(e.target.value); setLimit(60) }}>
+        {langs.map(l => <option key={l} value={l}>{l === 'All' ? 'All languages' : l}</option>)}
+      </select>
+    </div>
+    <div className="rule-grid">
+      {shown.map(r => (
+        <details key={r.id} className="rule-card">
+          <summary className="rule-card-head">
+            <span className={`severity severity-${r.severity}`}>{r.severity}</span>
+            <div className="rule-card-title">
+              <strong>{r.title}</strong>
+              <small>{r.id} · {r.cwe} · {r.category} · {r.lang}</small>
+            </div>
+          </summary>
+          <div className="rule-card-body">
+            <p className="finding-hint">{r.hint}</p>
+            <div className="rule-samples">
+              <div><span>Flagged pattern</span><code>{r.bad}</code></div>
+              <div><span>Recommended fix</span><code>{r.good}</code></div>
+            </div>
+          </div>
+        </details>
+      ))}
+    </div>
+    {filtered.length > limit && (
+      <div className="catalog-more">
+        <button className="filter-button" onClick={() => setLimit(n => n + 80)}>
+          Show more ({filtered.length - limit} remaining)
+        </button>
+      </div>
+    )}
+    {catalog && !filtered.length && <div className="empty-state">No rules match your current search filters</div>}
   </div>
 }
 
@@ -933,6 +1055,7 @@ function pageDescription(route: Route) {
     'Test runs': 'Review scans, history, and run detected project test scripts',
     Findings: 'Search, filter, inspect code context, and export findings from latest scans',
     Security: 'High-severity security heuristics from latest scans',
+    'Rule catalog': 'Browse all static rules, CWEs, and safe vs. flagged code examples',
     Environments: 'Local AI review engine status, detected project folders, and test commands',
     Settings: 'Manage local project data and workspace exports',
   })[route]

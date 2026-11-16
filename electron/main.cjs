@@ -8,6 +8,7 @@ const execFileAsync = promisify(execFile);
 // ipcMain is undefined when this file is required by the test runner.
 const ipc = typeof ipcMain?.handle === 'function' ? ipcMain.handle.bind(ipcMain) : () => {};
 const { scanProjectRoot, toSarifReport, toMarkdownReport, kinds } = require('./scanner.cjs');
+const { shared, categoryRules } = require('./rules.cjs');
 const { verifyFinding, reviewFindings, getSourceContext, checkAiHealth } = require('./ai-review.cjs');
 const isInside = (root, target) => { const rel = path.relative(root, target); return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel)); };
 const statePath = () => path.join(app.getPath('userData'), 'deepcheck-projects.json');
@@ -183,6 +184,15 @@ ipc('get-finding-context', async (_event, payload) => {
   return getSourceContext(project.root, finding.file, finding.line, 6);
 });
 ipc('check-ai-status', async () => checkAiHealth());
+ipc('list-rules', async () => {
+  const catalog = [
+    ...shared.map((r) => ({ id: r.id, title: r.title, severity: r.severity, cwe: r.cwe, lang: r.lang, category: 'Shared', hint: r.hint, bad: r.bad, good: r.good })),
+    ...Object.entries(categoryRules).flatMap(([cat, list]) =>
+      list.map((r) => ({ id: r.id, title: r.title, severity: r.severity, cwe: r.cwe, lang: r.lang, category: cat, hint: r.hint, bad: r.bad, good: r.good })),
+    ),
+  ];
+  return { total: catalog.length, categories: ['Shared', ...Object.keys(categoryRules)], rules: catalog };
+});
 ipc('export-report', async (_event, payload) => {
   const format = payload?.format || 'sarif';
   const projects = await readProjects();
