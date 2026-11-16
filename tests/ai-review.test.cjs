@@ -123,7 +123,7 @@ test('checkAiHealth reports online and model installation status', async () => {
 
 test('Cloud Codex provider supports health, fix generation, and safe file patching', async () => {
   const { generateFindingFix, applyFindingFix, CODEX_MODELS } = require('../electron/ai-review.cjs');
-  const noKey = await checkAiHealth({ provider: 'cloud-codex', apiKey: '' });
+  const noKey = await checkAiHealth({ provider: 'cloud-codex', apiKey: '', codexConnected: false });
   assert.equal(noKey.available, false);
   assert.equal(noKey.provider, 'cloud-codex');
 

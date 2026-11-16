@@ -128,7 +128,7 @@ select,select option,input,textarea{background-color:#161817;color:#e3e7e1}
 .extreme-placeholder{display:flex;align-items:center;gap:9px;color:#868d87;font-size:11px}
 .ai-provider-card{display:grid;gap:14px;padding:16px;margin:14px 0;border:1px solid #2c332d;border-radius:8px;background:#131614}
 .provider-tabs{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:4px;border-radius:7px;background:#0e100f;border:1px solid #232724}
-.provider-tabs button{padding:8px 12px;border-radius:5px;border:1px solid transparent;background:transparent;color:#939a94;font-size:12px;font-weight:500;cursor:pointer;transition:all .14s ease}
+.provider-tabs button{padding:8px 12px;border-radius:5px;border:1px solid transparent;background:transparent;color:#939a94;font-size:12px;font-weight:500;cursor:pointer;transition:background .14s ease,border-color .14s ease,color .14s ease}
 .provider-tabs button:hover{color:#dce2db}
 .provider-tabs button.selected{background:#1b251a;border-color:#44613d;color:#d6eec1}
 .provider-fields{display:grid;gap:12px}

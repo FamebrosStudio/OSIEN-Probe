@@ -199,7 +199,11 @@ async function checkAiHealth(options = {}) {
     const availableCodex = await getAvailableCodexModels();
     const activeModel = availableCodex.includes(options.model) ? options.model : availableCodex[0];
     const hasKey = Boolean(String(options.apiKey || '').trim());
-    const codexAuth = hasKey ? { connected: false } : await getCodexAuthStatus();
+    const codexAuth = hasKey
+      ? { connected: false }
+      : typeof options.codexConnected === 'boolean'
+        ? { connected: options.codexConnected }
+        : await getCodexAuthStatus();
     const ready = hasKey || codexAuth.connected;
     return {
       available: ready,

@@ -20,7 +20,7 @@ async function readAiConfig() {
     const raw = JSON.parse(await fs.readFile(aiConfigPath(), 'utf8'));
     return {
       provider: raw.provider === 'cloud-codex' ? 'cloud-codex' : 'local',
-      model: String(raw.model || (raw.provider === 'cloud-codex' ? CODEX_MODELS[0] : MODEL)),
+      model: String(raw.model || (raw.provider === 'cloud-codex' ? 'default' : MODEL)),
       apiKey: String(raw.apiKey || ''),
     };
   } catch {
