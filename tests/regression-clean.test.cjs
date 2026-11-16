@@ -119,3 +119,38 @@ test('clean modern Python, Go, Rust, and Java produce zero critical/high/medium 
   const serious = result.findings.filter((f) => ['critical', 'high', 'medium'].includes(f.severity));
   assert.deepEqual(serious, [], `Unexpected serious findings: ${JSON.stringify(serious)}`);
 });
+
+test('clean modern browser ESM, Web APIs, JSON-LD, canonical links, and CSS overscroll-behavior produce zero false positives', async () => {
+  const result = await scanClean({
+    'index.html': [
+      '<!doctype html>',
+      '<html lang="en">',
+      '<head>',
+      '<meta http-equiv="Content-Security-Policy" content="default-src \'self\'">',
+      '<link rel="canonical" href="https://example.com/" />',
+      '<link rel="preconnect" href="https://fonts.googleapis.com" />',
+      '<script type="application/ld+json">{"@context":"https://schema.org"}</script>',
+      '</head>',
+      '<body><main><h1>App</h1></main></body>',
+      '</html>',
+    ].join('\n'),
+    'styles.css': [
+      '.modal { overscroll-behavior: contain; scroll-behavior: smooth; }',
+    ].join('\n'),
+    'app.mjs': [
+      'import path from "node:path";',
+      'import { fileURLToPath } from "node:url";',
+      'const here = path.dirname(fileURLToPath(import.meta.url));',
+      'const levels = new Float32Array(0);',
+      'const canRecord = MediaRecorder.isTypeSupported("video/webm");',
+      'const dbReq = indexedDB.open("local-db", 1);',
+      'const update = { caption: "ok" };',
+      'const record = { latest_user_caption_update: update };',
+      'console.info(here, levels, canRecord, dbReq, record);',
+    ].join('\n'),
+  }, 'Website');
+
+  const badIds = new Set(['css-behavior', 'html-link-no-integrity', 'html-inline-script', 'js-undeclared-var', 'js-sql-concat']);
+  const hits = result.findings.filter((f) => badIds.has(f.ruleId));
+  assert.deepEqual(hits, [], `Unexpected false positives: ${JSON.stringify(hits)}`);
+});

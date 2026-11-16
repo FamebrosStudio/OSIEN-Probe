@@ -23,7 +23,12 @@ const KNOWN_GLOBALS = new Set([
   'getComputedStyle', 'requestAnimationFrame', 'cancelAnimationFrame', 'requestIdleCallback',
   'cancelIdleCallback', 'matchMedia', 'IntersectionObserver', 'ResizeObserver', 'MutationObserver',
   'XMLHttpRequest', 'FileReader', 'Blob', 'File', 'TextEncoder', 'TextDecoder', 'structuredClone',
-  'EventTarget', 'NodeList', 'DOMParser', 'getSelection', 'scrollTo', 'scrollBy',
+  'EventTarget', 'NodeList', 'DOMParser', 'XMLSerializer', 'getSelection', 'scrollTo', 'scrollBy',
+  'Float32Array', 'Float64Array', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Uint8ClampedArray',
+  'ArrayBuffer', 'SharedArrayBuffer', 'DataView', 'indexedDB', 'Image', 'Audio', 'Option',
+  'HTMLCanvasElement', 'HTMLImageElement', 'HTMLVideoElement', 'HTMLAudioElement', 'HTMLInputElement',
+  'MediaRecorder', 'MediaStream', 'AudioContext', 'OfflineAudioContext', 'WebSocket', 'EventSource',
+  'Worker', 'SharedWorker', 'BroadcastChannel', 'Notification', 'Storage', 'screen', 'devicePixelRatio', 'CSS',
 ]);
 
 function staticText(node) {
@@ -1057,6 +1062,7 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       && !(parent.type === 'UnaryExpression' && parent.operator === 'typeof')
       && !parent.type.startsWith('TS')
       && !parent.type.startsWith('Import')
+      && parent.type !== 'MetaProperty'
       && !isDeclared(node.name)
     ) {
       emit({
