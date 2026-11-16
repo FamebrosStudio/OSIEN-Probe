@@ -282,6 +282,40 @@ ipc('apply-finding-fix', async (_event, payload) => {
   });
   return res;
 });
+ipc('fix-all-findings', async (_event, payload) => {
+  const { projectId } = payload || {};
+  const aiCfg = await readAiConfig();
+  if (aiCfg.provider !== 'cloud-codex') {
+    throw new Error('Switch to Cloud (Codex) in Settings to use Fix all with AI.');
+  }
+  const projects = await readProjects();
+  const project = projects.find((item) => item.id === projectId);
+  if (!project?.latestRun) throw new Error('Scan this project before fixing findings.');
+  const queue = project.latestRun.findings
+    .filter((f) => !f.fixed && ['critical', 'high', 'medium'].includes(f.severity))
+    .slice(0, 15);
+  let fixed = 0;
+  let failed = 0;
+  for (let i = 0; i < queue.length; i++) {
+    const finding = queue[i];
+    broadcast('fix-all-progress', { projectId, total: queue.length, done: i, fixed, failed, currentTitle: finding.title, state: 'running' });
+    try {
+      const patch = await generateFindingFix(project.root, finding, { provider: aiCfg.provider, model: aiCfg.model, apiKey: aiCfg.apiKey });
+      await applyFindingFix(project.root, patch.file, patch.target, patch.replacement);
+      fixed++;
+      await withProjects((fresh) => {
+        const stored = fresh.find((p) => p.id === projectId)?.latestRun?.findings.find((f) => f.id === finding.id);
+        if (!stored) return false;
+        stored.fixed = true;
+        return true;
+      });
+    } catch {
+      failed++;
+    }
+  }
+  broadcast('fix-all-progress', { projectId, total: queue.length, done: queue.length, fixed, failed, currentTitle: '', state: 'done' });
+  return { total: queue.length, fixed, failed };
+});
 ipc('get-system-profile', async () => getSystemProfile());
 ipc('start-extreme-test', async (_event, projectId) => {
   const projects = await readProjects();

@@ -65,6 +65,8 @@ type Bridge = {
   disconnectCodex?(): Promise<{ config: AiConfig; health: AiHealth }>
   generateFindingFix?(p: { projectId: string; findingId: string }): Promise<{ explanation: string; target: string; replacement: string; file: string; model: string }>
   applyFindingFix?(p: { projectId: string; findingId: string; file: string; target: string; replacement: string }): Promise<{ applied: boolean; file: string }>
+  fixAllFindings?(p: { projectId: string }): Promise<{ total: number; fixed: number; failed: number }>
+  onFixAllProgress?(cb: (p: { projectId: string; total: number; done: number; fixed: number; failed: number; currentTitle: string; state: string }) => void): () => void
   listRules?(): Promise<CatalogPayload>
   getSystemProfile?(): Promise<SystemProfile>
   startExtremeTest?(projectId: string): Promise<{ cancelled: boolean; stats: ExtremeStats }>
@@ -124,6 +126,7 @@ function App() {
   const [aiConfig, setAiConfig] = useState<AiConfig | null>(null)
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [fixPreview, setFixPreview] = useState<FindingFixPreview | null>(null)
+  const [fixAllState, setFixAllState] = useState<{ projectId: string; total: number; done: number; fixed: number; failed: number; currentTitle: string; state: string } | null>(null)
   const [reviews, setReviews] = useState<Record<string, ReviewProgress>>({})
   const [catalog, setCatalog] = useState<CatalogPayload | null>(null)
   const [sysProfile, setSysProfile] = useState<SystemProfile | null>(null)
@@ -360,6 +363,43 @@ function App() {
     } finally {
       setBusy('')
     }
+  }
+  useEffect(() => {
+    if (!bridge?.onFixAllProgress) return
+    return bridge.onFixAllProgress((p) => {
+      setFixAllState(p.state === 'done' ? null : p)
+    })
+  }, [bridge])
+  const fixAllWithAi = (p: Project) => {
+    if (!bridge?.fixAllFindings || !p.latestRun) return
+    const count = Math.min(15, p.latestRun.findings.filter(f => !f.fixed && ['critical', 'high', 'medium'].includes(f.severity)).length)
+    if (!count) {
+      setMessage('No unfixed critical, high, or medium findings remain in this project.')
+      return
+    }
+    setConfirmState({
+      title: `Fix ${count} findings in ${p.name} with Codex?`,
+      body: 'Codex will generate minimal patches and apply them to your project files, then re-scan.',
+      detail: `${aiConfig?.model || 'Codex'} · ${p.root}`,
+      confirmLabel: `Fix ${count} findings`,
+      tone: 'primary',
+      onConfirm: async () => {
+        setBusy(`fixall:${p.id}`)
+        setMessage('')
+        try {
+          const res = await bridge.fixAllFindings!({ projectId: p.id })
+          await bridge.scanProject(p.id)
+          const fresh = await reload()
+          setSelectedProject(fresh.find(item => item.id === p.id) || null)
+          setMessage(`Codex fixed ${res.fixed} of ${res.total} finding(s)${res.failed ? ` (${res.failed} skipped)` : ''} and re-scanned ${p.name}.`)
+        } catch (e) {
+          setMessage(errorText(e))
+        } finally {
+          setBusy('')
+          setFixAllState(null)
+        }
+      },
+    })
   }
   const confirmApplyFix = async () => {
     if (!fixPreview || !bridge?.applyFindingFix) return
@@ -606,6 +646,10 @@ function App() {
           </div>
         </div>
         {message && <div className="global-message" role="alert">{message}<button className="icon-button" onClick={() => setMessage('')}><X size={15}/></button></div>}
+        {fixAllState && <div className="review-banner">
+          <RefreshCw size={13} className="spinning"/>
+          <span>Codex is fixing findings ({fixAllState.done}/{fixAllState.total} · {fixAllState.fixed} applied): {fixAllState.currentTitle}</span>
+        </div>}
         {Object.values(reviews).map(r => {
           const name = projects.find(p => p.id === r.projectId)?.name || 'project'
           return <div className="review-banner" key={r.projectId}>
@@ -689,7 +733,7 @@ function App() {
         ) : route === 'Test runs' ? (
           <>
             {extreme && <ExtremeSandboxView extreme={extreme} sysProfile={sysProfile} onStop={stopExtremeTest} onClose={() => setExtreme(null)}/>}
-            <Runs projects={projects} selected={selectedProject} busy={busy} onScan={scan} onExtreme={startExtremeTest} onTest={runTests} onRunFile={runTestFile} onExport={exportReport}/>
+            <Runs projects={projects} selected={selectedProject} busy={busy} isCloudCodex={aiConfig?.provider === 'cloud-codex'} onScan={scan} onExtreme={startExtremeTest} onFixAll={fixAllWithAi} onTest={runTests} onRunFile={runTestFile} onExport={exportReport}/>
           </>
         ) : route === 'Rule catalog' ? (
           <RuleCatalog catalog={catalog}/>
@@ -1161,8 +1205,10 @@ function Runs({
   projects,
   selected,
   busy,
+  isCloudCodex,
   onScan,
   onExtreme,
+  onFixAll,
   onTest,
   onRunFile,
   onExport,
@@ -1170,8 +1216,10 @@ function Runs({
   projects: Project[]
   selected: Project | null
   busy: string
+  isCloudCodex: boolean
   onScan(p: Project): void
   onExtreme(p: Project): void
+  onFixAll(p: Project): void
   onTest(p: Project): void
   onRunFile(p: Project, target: TestTarget): void
   onExport(format: 'sarif' | 'markdown' | 'json', projectId?: string): void
@@ -1189,6 +1237,11 @@ function Runs({
           {p.kind === 'Website' && (
             <button className="filter-button extreme-btn" onClick={() => onExtreme(p)} disabled={!!busy}>
               <Activity size={13}/> Extreme sandbox
+            </button>
+          )}
+          {isCloudCodex && p.latestRun && p.latestRun.findings.some(f => !f.fixed && ['critical', 'high', 'medium'].includes(f.severity)) && (
+            <button className="filter-button fix-finding-btn" onClick={() => onFixAll(p)} disabled={!!busy}>
+              <ShieldCheck size={13}/> {busy === `fixall:${p.id}` ? 'Fixing all…' : 'Fix all with AI'}
             </button>
           )}
           <button className="primary" onClick={() => onScan(p)} disabled={busy === `scan:${p.id}`}>

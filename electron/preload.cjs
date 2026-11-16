@@ -18,6 +18,12 @@ contextBridge.exposeInMainWorld('deepcheck', {
   disconnectCodex: () => ipcRenderer.invoke('disconnect-codex'),
   generateFindingFix: (payload) => ipcRenderer.invoke('generate-finding-fix', payload),
   applyFindingFix: (payload) => ipcRenderer.invoke('apply-finding-fix', payload),
+  fixAllFindings: (payload) => ipcRenderer.invoke('fix-all-findings', payload),
+  onFixAllProgress: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('fix-all-progress', listener);
+    return () => ipcRenderer.removeListener('fix-all-progress', listener);
+  },
   listRules: () => ipcRenderer.invoke('list-rules'),
   getSystemProfile: () => ipcRenderer.invoke('get-system-profile'),
   startExtremeTest: (projectId) => ipcRenderer.invoke('start-extreme-test', projectId),

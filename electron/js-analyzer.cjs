@@ -441,17 +441,30 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       }
     }
 
-    // Off-by-one loop condition (<= .length) and splice-during-iteration.
+    // Off-by-one loop condition (<= .length) when the loop actually indexes targetObj[loopVar].
     if (node.type === 'ForStatement') {
       if (node.test?.type === 'BinaryExpression' && node.test.operator === '<=' && memberName(node.test.right) === 'length') {
         const targetObj = raw.slice(node.test.right.object.start, node.test.right.object.end);
-        emit({
-          id: 'js-off-by-one-loop',
-          title: 'Off-by-one loop bound (<= .length)',
-          severity: 'medium',
-          cwe: 'CWE-193',
-          hint: 'Use "< .length" instead of "<= .length" to avoid reading past the end.',
-        }, node.test, 'high', `Loop condition "<= ${targetObj}.length" iterates one element past the valid index range.`);
+        const loopVar = node.test.left?.type === 'Identifier' ? node.test.left.name : '';
+        let indexesTargetDirectly = !loopVar;
+        if (loopVar) {
+          indexesTargetDirectly = false;
+          walkSubtree(node.body, (sub) => {
+            if (sub.type === 'MemberExpression' && sub.computed && sub.property?.type === 'Identifier' && sub.property.name === loopVar) {
+              const objSrc = raw.slice(sub.object.start, sub.object.end);
+              if (objSrc === targetObj) indexesTargetDirectly = true;
+            }
+          });
+        }
+        if (indexesTargetDirectly) {
+          emit({
+            id: 'js-off-by-one-loop',
+            title: 'Off-by-one loop bound (<= .length)',
+            severity: 'medium',
+            cwe: 'CWE-193',
+            hint: 'Use "< .length" instead of "<= .length" to avoid reading past the end.',
+          }, node.test, 'high', `Loop condition "<= ${targetObj}.length" iterates one element past the valid index range.`);
+        }
       }
       if (node.update?.type === 'UpdateExpression' && node.update.operator === '++' && node.update.argument?.type === 'Identifier') {
         const indexVar = node.update.argument.name;
