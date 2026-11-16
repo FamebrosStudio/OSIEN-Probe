@@ -870,7 +870,8 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
           }, node.arguments[0], 'high', `.${name}() callback uses a block body {} with no return statement, returning undefined.`);
         }
       }
-      if (name === 'catch' && node.arguments[0] && (node.arguments[0].type === 'ArrowFunctionExpression' || node.arguments[0].type === 'FunctionExpression')) {
+      if (name === 'catch' && !(parent?.type === 'MemberExpression' && parentKey === 'object')
+        && node.arguments[0] && (node.arguments[0].type === 'ArrowFunctionExpression' || node.arguments[0].type === 'FunctionExpression')) {
         const cb = node.arguments[0];
         if (cb.body?.type === 'BlockStatement' && cb.body.body.length === 0) {
           emit({
