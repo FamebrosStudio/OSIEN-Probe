@@ -75,14 +75,17 @@
       "dist/**/*",
       "electron/**/*",
       "bin/**/*",
+      "build/**/*",
       "skills/**/*"
     ],
     "win": {
+      "icon": "build/icon.ico",
       "target": [
         "nsis"
       ]
     },
     "mac": {
+      "icon": "build/icon.png",
       "category": "public.app-category.developer-tools",
       "target": [
         "dmg",
@@ -90,6 +93,7 @@
       ]
     },
     "linux": {
+      "icon": "build/icon.png",
       "category": "Development",
       "target": [
         "AppImage",

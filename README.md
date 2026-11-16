@@ -1,6 +1,10 @@
-# DeepCheck
+<p align="center">
+  <img src="public/logo.png" alt="OSIEN Probe" width="120" />
+</p>
 
-Windows desktop app for importing local folders or Git repositories, scanning source for bug patterns, and reviewing findings offline.
+# OSIEN Probe
+
+Windows, Linux, and macOS desktop app + CLI + MCP server for importing local folders or Git repositories, scanning source for bug patterns, and reviewing findings offline.
 
 ## Run
 

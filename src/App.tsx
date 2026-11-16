@@ -274,7 +274,7 @@ function App() {
 
   return <div className="app-shell">
     <aside className="sidebar">
-      <div className="brand"><span className="brand-mark"><ShieldCheck size={19}/></span><span>OSIEN Probe</span></div>
+      <div className="brand"><img className="brand-logo" src="./logo.png" alt="OSIEN Probe"/><span>OSIEN Probe</span></div>
       <div className="workspace-wrap">
         <button className="workspace" onClick={() => setWorkspaceOpen(v => !v)}>
           <div className="workspace-icon"><Folder size={15}/></div>
@@ -307,7 +307,7 @@ function App() {
           <small>Across connected projects</small>
         </div>
         <div className="profile">
-          <div className="avatar"><ShieldCheck size={15}/></div>
+          <div className="avatar"><img className="avatar-logo" src="./logo.png" alt="OSIEN Probe"/></div>
           <div><strong>Local analysis</strong><small>{aiHealth?.modelInstalled ? `AI ready (${aiHealth.model})` : 'Data stays on this device'}</small></div>
         </div>
       </div>
@@ -857,7 +857,7 @@ function InfoDialog({ onClose }: { onClose(): void }) {
   return <div className="overlay" onMouseDown={e => { if (e.target === e.currentTarget) onClose() }}>
     <section className="dialog">
       <div className="dialog-head">
-        <div><h2>About OSIEN Probe scans</h2><p>Local source checks, AI review, and project tests are separate steps</p></div>
+        <div className="dialog-brand"><img className="dialog-logo" src="./logo.png" alt="OSIEN Probe"/><div><h2>About OSIEN Probe scans</h2><p>Local source checks, AI review, and project tests are separate steps</p></div></div>
         <button className="icon-button" onClick={onClose}><X size={18}/></button>
       </div>
       <div className="help-copy">
