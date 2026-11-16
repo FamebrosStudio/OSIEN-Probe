@@ -13,6 +13,14 @@ contextBridge.exposeInMainWorld('deepcheck', {
   getFindingContext: (payload) => ipcRenderer.invoke('get-finding-context', payload),
   checkAiStatus: () => ipcRenderer.invoke('check-ai-status'),
   listRules: () => ipcRenderer.invoke('list-rules'),
+  getSystemProfile: () => ipcRenderer.invoke('get-system-profile'),
+  startExtremeTest: (projectId) => ipcRenderer.invoke('start-extreme-test', projectId),
+  stopExtremeTest: (projectId) => ipcRenderer.invoke('stop-extreme-test', projectId),
+  onExtremeTestEvent: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('extreme-test-event', listener);
+    return () => ipcRenderer.removeListener('extreme-test-event', listener);
+  },
   exportReport: (payload) => ipcRenderer.invoke('export-report', payload),
   runProjectTests: (id) => ipcRenderer.invoke('run-project-tests', id),
   runProjectTestFile: (payload) => ipcRenderer.invoke('run-project-test-file', payload),

@@ -19,6 +19,24 @@ type AiHealth = { available: boolean; modelInstalled: boolean; model: string; en
 type Route = 'Projects' | 'Test runs' | 'Findings' | 'Security' | 'Rule catalog' | 'Environments' | 'Settings'
 type CatalogRule = { id: string; title: string; severity: string; cwe: string; lang: string; category: string; hint: string; bad: string; good: string }
 type CatalogPayload = { total: number; categories: string[]; rules: CatalogRule[] }
+type SystemProfile = { cpuModel: string; cpuCores: number; totalMemGb: number; freeMemGb: number; tier: 'high' | 'balanced' | 'light'; maxSteps: number; stepDelayMs: number }
+type ExtremeFinding = { ruleId: string; title: string; severity: string; cwe: string; detail: string }
+type ExtremeStats = { pages: number; clicks: number; inputsFuzzed: number; findings: number }
+type ExtremeState = {
+  projectId: string
+  projectName: string
+  running: boolean
+  step: number
+  maxSteps: number
+  url: string
+  action: string
+  targetLabel: string
+  frameUrl: string
+  stats: ExtremeStats
+  logs: { level: string; text: string }[]
+  findings: ExtremeFinding[]
+  error?: string
+}
 type ConfirmState = {
   title: string
   body: string
@@ -40,6 +58,10 @@ type Bridge = {
   getFindingContext?(p: { projectId: string; findingId: string }): Promise<SourceContext>
   checkAiStatus?(): Promise<AiHealth>
   listRules?(): Promise<CatalogPayload>
+  getSystemProfile?(): Promise<SystemProfile>
+  startExtremeTest?(projectId: string): Promise<{ cancelled: boolean; stats: ExtremeStats }>
+  stopExtremeTest?(projectId: string): Promise<boolean>
+  onExtremeTestEvent?(cb: (ev: { projectId: string; type: string; [k: string]: unknown }) => void): () => void
   exportReport?(p: { projectId?: string; format: 'sarif' | 'markdown' | 'json' }): Promise<{ saved: boolean; filePath: string | null }>
   runProjectTests(id: string): Promise<TestResult>
   runProjectTestFile(p: { projectId: string; file: string }): Promise<TestResult>
@@ -93,6 +115,9 @@ function App() {
   const [aiHealth, setAiHealth] = useState<AiHealth | null>(null)
   const [reviews, setReviews] = useState<Record<string, ReviewProgress>>({})
   const [catalog, setCatalog] = useState<CatalogPayload | null>(null)
+  const [sysProfile, setSysProfile] = useState<SystemProfile | null>(null)
+  const [extremeChoice, setExtremeChoice] = useState<Project | null>(null)
+  const [extreme, setExtreme] = useState<ExtremeState | null>(null)
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -260,6 +285,87 @@ function App() {
     if (!bridge?.listRules) return
     void bridge.listRules().then(setCatalog).catch((e) => setMessage(errorText(e)))
   }, [bridge])
+  useEffect(() => {
+    if (!bridge?.getSystemProfile) return
+    void bridge.getSystemProfile().then(setSysProfile).catch((e) => setMessage(errorText(e)))
+  }, [bridge])
+  useEffect(() => {
+    if (!bridge?.onExtremeTestEvent) return
+    return bridge.onExtremeTestEvent((ev) => {
+      setExtreme((prev) => {
+        if (!prev || prev.projectId !== ev.projectId) return prev
+        if (ev.type === 'frame' && typeof ev.dataUrl === 'string') {
+          return { ...prev, frameUrl: ev.dataUrl }
+        }
+        if (ev.type === 'log' && typeof ev.text === 'string') {
+          const nextLogs = [{ level: String(ev.level || 'info'), text: ev.text }, ...prev.logs].slice(0, 60)
+          return { ...prev, logs: nextLogs }
+        }
+        if (ev.type === 'finding' && ev.finding) {
+          return { ...prev, findings: [ev.finding as ExtremeFinding, ...prev.findings] }
+        }
+        if (ev.type === 'step') {
+          const stats = (ev.stats as ExtremeStats) || prev.stats
+          const label = typeof ev.targetLabel === 'string' && ev.targetLabel ? ` · ${ev.targetLabel}` : ''
+          const stepLog = { level: 'step', text: `[${ev.step}/${ev.maxSteps}] ${ev.action}${label}` }
+          return {
+            ...prev,
+            step: Number(ev.step || prev.step),
+            maxSteps: Number(ev.maxSteps || prev.maxSteps),
+            url: String(ev.url || prev.url),
+            action: String(ev.action || ''),
+            targetLabel: String(ev.targetLabel || ''),
+            stats,
+            logs: [stepLog, ...prev.logs].slice(0, 60),
+          }
+        }
+        if (ev.type === 'done') {
+          return { ...prev, running: false, stats: (ev.stats as ExtremeStats) || prev.stats }
+        }
+        return prev
+      })
+    })
+  }, [bridge])
+  const startExtremeTest = async (p: Project) => {
+    if (!bridge?.startExtremeTest) return
+    setExtremeChoice(null)
+    setSelectedProject(p)
+    setRoute('Test runs')
+    setMessage('')
+    setExtreme({
+      projectId: p.id,
+      projectName: p.name,
+      running: true,
+      step: 0,
+      maxSteps: sysProfile?.maxSteps || 55,
+      url: 'Starting sandbox…',
+      action: 'boot',
+      targetLabel: '',
+      frameUrl: '',
+      stats: { pages: 0, clicks: 0, inputsFuzzed: 0, findings: 0 },
+      logs: [{ level: 'info', text: `Launching isolated sandbox for ${p.name}…` }],
+      findings: [],
+    })
+    try {
+      await bridge.startExtremeTest(p.id)
+    } catch (e) {
+      setExtreme(prev => prev ? { ...prev, running: false, error: errorText(e) } : null)
+    }
+  }
+  const stopExtremeTest = async (projectId: string) => {
+    try {
+      await bridge?.stopExtremeTest?.(projectId)
+    } catch (e) {
+      setMessage(errorText(e))
+    }
+  }
+  const triggerProjectTest = (p: Project) => {
+    if (p.kind === 'Website' && bridge?.startExtremeTest) {
+      setExtremeChoice(p)
+      return
+    }
+    void scan(p)
+  }
   const addProject = async () => {
     if (!kind) return
     setBusy('add')
@@ -271,6 +377,10 @@ function App() {
       setKind(null)
       setFolder('')
       setUrl('')
+      if (p.kind === 'Website' && bridge?.startExtremeTest) {
+        setExtremeChoice(p)
+        return
+      }
       if (source === 'repo') {
         setBusy(`scan:${p.id}`)
         try {
@@ -448,7 +558,7 @@ function App() {
                   </> : <span className="muted">—</span>}
                 </div>
                 <div className="row-actions">
-                  <button className="row-action" aria-label={`Scan ${p.name}`} title="Run source scan" disabled={busy === `scan:${p.id}`} onClick={() => void scan(p)}>
+                  <button className="row-action" aria-label={`Scan ${p.name}`} title={p.kind === 'Website' ? 'Choose Traditional or Extreme Sandbox Test' : 'Run source scan'} disabled={busy === `scan:${p.id}`} onClick={() => triggerProjectTest(p)}>
                     {busy === `scan:${p.id}` ? <RefreshCw size={14} className="spinning"/> : <Play size={14}/>}
                   </button>
                   <button className="row-action danger-action" aria-label={`Remove ${p.name}`} title="Remove project" onClick={() => void removeProject(p)}>
@@ -482,7 +592,10 @@ function App() {
             onOpen={p => { setSelectedProject(p); setRoute('Test runs') }}
           />
         ) : route === 'Test runs' ? (
-          <Runs projects={projects} selected={selectedProject} busy={busy} onScan={scan} onTest={runTests} onRunFile={runTestFile} onExport={exportReport}/>
+          <>
+            {extreme && <ExtremeSandboxView extreme={extreme} sysProfile={sysProfile} onStop={stopExtremeTest} onClose={() => setExtreme(null)}/>}
+            <Runs projects={projects} selected={selectedProject} busy={busy} onScan={scan} onExtreme={startExtremeTest} onTest={runTests} onRunFile={runTestFile} onExport={exportReport}/>
+          </>
         ) : route === 'Rule catalog' ? (
           <RuleCatalog catalog={catalog}/>
         ) : route === 'Environments' ? (
@@ -571,6 +684,33 @@ function App() {
         >
           {confirmState.confirmLabel}
         </button>
+      </div>
+    </section></div>}
+    {extremeChoice && <div className="overlay" onMouseDown={e => { if (e.target === e.currentTarget) setExtremeChoice(null) }}><section className="dialog choice-dialog">
+      <div className="dialog-brand">
+        <img className="dialog-logo" src="./logo.png" alt="OSIEN Probe"/>
+        <div>
+          <h2>Choose test mode for {extremeChoice.name}</h2>
+          <p>Run a traditional static analysis or launch an Extreme Live Sandbox Test on your PC.</p>
+        </div>
+      </div>
+      <div className="mode-grid">
+        <button className="mode-card" onClick={() => { const target = extremeChoice; setExtremeChoice(null); void scan(target) }}>
+          <div className="mode-badge">Fast · Static</div>
+          <strong>Traditional Test</strong>
+          <small>Evaluates 550+ static rules, AST checks, taint tracking, and detects your unit test suite without running the app.</small>
+        </button>
+        <button className="mode-card mode-card-extreme" onClick={() => void startExtremeTest(extremeChoice)}>
+          <div className="mode-badge mode-badge-extreme">Website · Live Sandbox</div>
+          <strong>Extreme Live Sandbox Test</strong>
+          <small>
+            Boots {extremeChoice.name} in an isolated 127.0.0.1 sandbox ({sysProfile ? `${sysProfile.cpuCores} cores · ${sysProfile.totalMemGb} GB RAM` : 'local PC'}), clicks every UI flow, fuzzes forms &amp; XSS escaping without AI, and streams live side-by-side.
+          </small>
+        </button>
+      </div>
+      <div className="dialog-foot">
+        <span>Sandbox blocks external network requests and isolates storage</span>
+        <button className="filter-button" onClick={() => setExtremeChoice(null)}>Cancel</button>
       </div>
     </section></div>}
   </div>
@@ -794,6 +934,7 @@ function Runs({
   selected,
   busy,
   onScan,
+  onExtreme,
   onTest,
   onRunFile,
   onExport,
@@ -802,6 +943,7 @@ function Runs({
   selected: Project | null
   busy: string
   onScan(p: Project): void
+  onExtreme(p: Project): void
   onTest(p: Project): void
   onRunFile(p: Project, target: TestTarget): void
   onExport(format: 'sarif' | 'markdown' | 'json', projectId?: string): void
@@ -816,6 +958,11 @@ function Runs({
             <button className="filter-button" onClick={() => onExport('sarif', p.id)} disabled={!!busy}><Download size={13}/> SARIF</button>
             <button className="filter-button" onClick={() => onExport('markdown', p.id)} disabled={!!busy}><Download size={13}/> Report</button>
           </>}
+          {p.kind === 'Website' && (
+            <button className="filter-button extreme-btn" onClick={() => onExtreme(p)} disabled={!!busy}>
+              <Activity size={13}/> Extreme sandbox
+            </button>
+          )}
           <button className="primary" onClick={() => onScan(p)} disabled={busy === `scan:${p.id}`}>
             <RefreshCw size={14} className={busy === `scan:${p.id}` ? 'spinning' : ''}/>
             {busy === `scan:${p.id}` ? 'Scanning…' : 'Scan source'}
@@ -961,6 +1108,79 @@ function InfoDialog({ onClose }: { onClose(): void }) {
       <div className="dialog-foot"><span>OSIEN Probe · Local analysis</span><button className="primary" onClick={onClose}>Close</button></div>
     </section>
   </div>
+}
+
+function ExtremeSandboxView({
+  extreme,
+  sysProfile,
+  onStop,
+  onClose,
+}: {
+  extreme: ExtremeState
+  sysProfile: SystemProfile | null
+  onStop(projectId: string): void
+  onClose(): void
+}) {
+  return <section className="extreme-shell">
+    <div className="extreme-head">
+      <div className="extreme-title">
+        <span className={`live-dot ${extreme.running ? '' : 'live-dot-idle'}`}/>
+        <div>
+          <strong>Extreme Live Sandbox · {extreme.projectName}</strong>
+          <small>
+            {sysProfile ? `${sysProfile.cpuCores} cores · ${sysProfile.totalMemGb} GB RAM (${sysProfile.tier} tier)` : 'Local PC sandbox'} · Step {extreme.step}/{extreme.maxSteps} · {extreme.running ? 'Autonomous stress test running' : 'Completed'}
+          </small>
+        </div>
+      </div>
+      <div className="export-actions">
+        {extreme.running
+          ? <button className="danger-button" onClick={() => onStop(extreme.projectId)}>Stop sandbox</button>
+          : <button className="filter-button" onClick={onClose}>Close view</button>}
+      </div>
+    </div>
+    {extreme.error && <div className="form-error">{extreme.error}</div>}
+    <div className="extreme-split">
+      <div className="extreme-telemetry">
+        <div className="extreme-stats">
+          <div><span>Pages</span><b>{extreme.stats.pages}</b></div>
+          <div><span>Clicks</span><b>{extreme.stats.clicks}</b></div>
+          <div><span>Forms fuzzed</span><b>{extreme.stats.inputsFuzzed}</b></div>
+          <div><span>Findings</span><b>{extreme.findings.length}</b></div>
+        </div>
+        {extreme.findings.length > 0 && <div className="extreme-findings">
+          <strong>Live findings ({extreme.findings.length})</strong>
+          {extreme.findings.map((f, i) => (
+            <div key={`${f.ruleId}-${i}`} className="extreme-finding-row">
+              <span className={`severity severity-${f.severity}`}>{f.severity}</span>
+              <div>
+                <strong>{f.title}</strong>
+                <small>{f.cwe} · {f.detail}</small>
+              </div>
+            </div>
+          ))}
+        </div>}
+        <div className="extreme-logs">
+          <strong>Autonomous action feed</strong>
+          <div className="extreme-log-list">
+            {extreme.logs.map((l, i) => (
+              <div key={i} className={`extreme-log-line log-${l.level}`}>{l.text}</div>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="extreme-viewport">
+        <div className="extreme-urlbar">
+          <span className="sandbox-pill">127.0.0.1 SANDBOX</span>
+          <code>{extreme.url}</code>
+        </div>
+        <div className="extreme-screen">
+          {extreme.frameUrl
+            ? <img src={extreme.frameUrl} alt="Live sandbox viewport"/>
+            : <div className="extreme-placeholder"><RefreshCw size={18} className="spinning"/><span>Booting isolated Chromium sandbox…</span></div>}
+        </div>
+      </div>
+    </div>
+  </section>
 }
 
 function RuleCatalog({ catalog }: { catalog: CatalogPayload | null }) {

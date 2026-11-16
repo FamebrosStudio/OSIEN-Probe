@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell, session } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const { execFile } = require('node:child_process');
@@ -10,6 +10,7 @@ const ipc = typeof ipcMain?.handle === 'function' ? ipcMain.handle.bind(ipcMain)
 const { scanProjectRoot, toSarifReport, toMarkdownReport, kinds } = require('./scanner.cjs');
 const { shared, categoryRules } = require('./rules.cjs');
 const { verifyFinding, reviewFindings, getSourceContext, checkAiHealth } = require('./ai-review.cjs');
+const { getSystemProfile, runExtremeTest, stopExtremeTest } = require('./extreme-tester.cjs');
 const isInside = (root, target) => { const rel = path.relative(root, target); return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel)); };
 const statePath = () => path.join(app.getPath('userData'), 'deepcheck-projects.json');
 async function readProjects() { try { return JSON.parse(await fs.readFile(statePath(), 'utf8')); } catch { return []; } }
@@ -184,6 +185,24 @@ ipc('get-finding-context', async (_event, payload) => {
   return getSourceContext(project.root, finding.file, finding.line, 6);
 });
 ipc('check-ai-status', async () => checkAiHealth());
+ipc('get-system-profile', async () => getSystemProfile());
+ipc('start-extreme-test', async (_event, projectId) => {
+  const projects = await readProjects();
+  const project = projects.find((item) => item.id === projectId);
+  if (!project) throw new Error('Project not found');
+  if (project.kind !== 'Website') throw new Error('Extreme Live Sandbox Test is currently available for Website projects.');
+  return runExtremeTest({
+    project,
+    BrowserWindow,
+    session,
+    onEvent: (payload) => {
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) win.webContents.send('extreme-test-event', payload);
+      }
+    },
+  });
+});
+ipc('stop-extreme-test', async (_event, projectId) => stopExtremeTest(projectId));
 ipc('list-rules', async () => {
   const catalog = [
     ...shared.map((r) => ({ id: r.id, title: r.title, severity: r.severity, cwe: r.cwe, lang: r.lang, category: 'Shared', hint: r.hint, bad: r.bad, good: r.good })),
