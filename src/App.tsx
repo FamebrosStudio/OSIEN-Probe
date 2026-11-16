@@ -6,7 +6,9 @@ import './UIOverrides.css'
 
 type Kind = 'Website' | 'Software' | 'API / backend' | 'Mobile app' | 'Library' | 'Data / ML'
 type AiAssessment = { verdict: 'likely_real' | 'likely_false_positive' | 'uncertain'; confidence: number; rationale: string; evidence: string; reviewAdvice: string; model: string; reviewedAt: string }
-type Finding = { id: string; title: string; severity: string; file: string; line: number; excerpt: string; ruleId?: string; cwe?: string; hint?: string; confidence?: string; reason?: string; isNew?: boolean; aiAssessment?: AiAssessment; aiReviewError?: string }
+type Finding = { id: string; title: string; severity: string; file: string; line: number; excerpt: string; ruleId?: string; cwe?: string; hint?: string; confidence?: string; reason?: string; isNew?: boolean; fixed?: boolean; aiAssessment?: AiAssessment; aiReviewError?: string }
+type AiConfig = { provider: 'local' | 'cloud-codex'; model: string; hasApiKey: boolean; apiKeyMasked: string; localModels: string[]; codexModels: string[] }
+type FindingFixPreview = { projectId: string; findingId: string; file: string; explanation: string; target: string; replacement: string; model: string }
 type TestTarget = { file: string; runner: 'node' | 'npm' | 'pytest' | 'go' | 'cargo'; names?: string[]; command: string }
 type SeverityCounts = { critical: number; high: number; medium: number; low: number; info: number }
 type ScanHistoryEntry = { id: string; completedAt: string; score: number; filesScanned: number; findingsCount: number; durationMs?: number; severityCounts?: SeverityCounts }
@@ -57,6 +59,10 @@ type Bridge = {
   verifyFinding(p: { projectId: string; findingId: string }): Promise<AiAssessment>
   getFindingContext?(p: { projectId: string; findingId: string }): Promise<SourceContext>
   checkAiStatus?(): Promise<AiHealth>
+  getAiConfig?(): Promise<AiConfig>
+  saveAiConfig?(p: { provider: 'local' | 'cloud-codex'; model: string; apiKey?: string; clearApiKey?: boolean }): Promise<{ config: AiConfig; health: AiHealth }>
+  generateFindingFix?(p: { projectId: string; findingId: string }): Promise<{ explanation: string; target: string; replacement: string; file: string; model: string }>
+  applyFindingFix?(p: { projectId: string; findingId: string; file: string; target: string; replacement: string }): Promise<{ applied: boolean; file: string }>
   listRules?(): Promise<CatalogPayload>
   getSystemProfile?(): Promise<SystemProfile>
   startExtremeTest?(projectId: string): Promise<{ cancelled: boolean; stats: ExtremeStats }>
@@ -113,6 +119,9 @@ function App() {
   const [confirmClear, setConfirmClear] = useState(false)
   const [confirmState, setConfirmState] = useState<ConfirmState>(null)
   const [aiHealth, setAiHealth] = useState<AiHealth | null>(null)
+  const [aiConfig, setAiConfig] = useState<AiConfig | null>(null)
+  const [apiKeyInput, setApiKeyInput] = useState('')
+  const [fixPreview, setFixPreview] = useState<FindingFixPreview | null>(null)
   const [reviews, setReviews] = useState<Record<string, ReviewProgress>>({})
   const [catalog, setCatalog] = useState<CatalogPayload | null>(null)
   const [sysProfile, setSysProfile] = useState<SystemProfile | null>(null)
@@ -289,6 +298,59 @@ function App() {
     if (!bridge?.getSystemProfile) return
     void bridge.getSystemProfile().then(setSysProfile).catch((e) => setMessage(errorText(e)))
   }, [bridge])
+  useEffect(() => {
+    if (!bridge?.getAiConfig) return
+    void bridge.getAiConfig().then(setAiConfig).catch((e) => setMessage(errorText(e)))
+  }, [bridge])
+  const saveAiSettings = async (nextProvider: 'local' | 'cloud-codex', nextModel: string, newKey?: string, clearApiKey?: boolean) => {
+    if (!bridge?.saveAiConfig) return
+    setBusy('save-ai')
+    setMessage('')
+    try {
+      const res = await bridge.saveAiConfig({ provider: nextProvider, model: nextModel, apiKey: newKey, clearApiKey })
+      setAiConfig(res.config)
+      setAiHealth(res.health)
+      if (newKey) setApiKeyInput('')
+    } catch (e) {
+      setMessage(errorText(e))
+    } finally {
+      setBusy('')
+    }
+  }
+  const requestFix = async (projectId: string, findingId: string) => {
+    if (!bridge?.generateFindingFix) return
+    setBusy(`fix:${findingId}`)
+    setMessage('')
+    try {
+      const res = await bridge.generateFindingFix({ projectId, findingId })
+      setFixPreview({ projectId, findingId, ...res })
+    } catch (e) {
+      setMessage(errorText(e))
+    } finally {
+      setBusy('')
+    }
+  }
+  const confirmApplyFix = async () => {
+    if (!fixPreview || !bridge?.applyFindingFix) return
+    setBusy(`apply:${fixPreview.findingId}`)
+    setMessage('')
+    try {
+      await bridge.applyFindingFix({
+        projectId: fixPreview.projectId,
+        findingId: fixPreview.findingId,
+        file: fixPreview.file,
+        target: fixPreview.target,
+        replacement: fixPreview.replacement,
+      })
+      await reload()
+      setMessage(`Fix applied to ${fixPreview.file}. Re-scan to verify the updated score.`)
+      setFixPreview(null)
+    } catch (e) {
+      setMessage(errorText(e))
+    } finally {
+      setBusy('')
+    }
+  }
   useEffect(() => {
     if (!bridge?.onExtremeTestEvent) return
     return bridge.onExtremeTestEvent((ev) => {
@@ -587,7 +649,9 @@ function App() {
             projects={projects}
             busy={busy}
             bridge={bridge}
+            isCloudCodex={aiConfig?.provider === 'cloud-codex'}
             onVerify={verifyFinding}
+            onFix={requestFix}
             onExport={exportReport}
             onOpen={p => { setSelectedProject(p); setRoute('Test runs') }}
           />
@@ -602,11 +666,77 @@ function App() {
           <Environments projects={projects} aiHealth={aiHealth} onCheckAi={refreshAll} onOpen={p => void bridge!.openProject(p.id)} onTest={runTests} busy={busy}/>
         ) : (
           <div className="settings-panel">
-            <h2>Local data &amp; AI review</h2>
-            <p>Connected project metadata, scan history, and latest scan results are stored in this Windows user profile. Project source files are not copied for local-folder projects.</p>
+            <h2>AI Provider &amp; Models</h2>
+            <p>Choose between 100% offline local Ollama models or Cloud Codex (OpenAI) to unlock direct one-click finding fixes.</p>
+            {aiConfig && <div className="ai-provider-card">
+              <div className="provider-tabs">
+                <button
+                  type="button"
+                  className={aiConfig.provider === 'local' ? 'selected' : ''}
+                  onClick={() => void saveAiSettings('local', aiConfig.localModels[0] || 'qwen2.5-coder:1.5b')}
+                >
+                  Local (Ollama)
+                </button>
+                <button
+                  type="button"
+                  className={aiConfig.provider === 'cloud-codex' ? 'selected' : ''}
+                  onClick={() => void saveAiSettings('cloud-codex', aiConfig.codexModels[0] || 'gpt-5.2-codex')}
+                >
+                  Cloud (Codex)
+                </button>
+              </div>
+              <div className="provider-fields">
+                <label className="field-label">
+                  Active model
+                  <select
+                    className="filter-button"
+                    value={aiConfig.model}
+                    onChange={e => void saveAiSettings(aiConfig.provider, e.target.value)}
+                  >
+                    {(aiConfig.provider === 'cloud-codex' ? aiConfig.codexModels : aiConfig.localModels).map(m => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </label>
+                {aiConfig.provider === 'cloud-codex' && (
+                  <div className="codex-key-row">
+                    <label className="field-label">
+                      OpenAI API Key {aiConfig.hasApiKey ? `(saved: ${aiConfig.apiKeyMasked})` : '(required for Cloud Codex)'}
+                      <input
+                        type="password"
+                        className="text-field"
+                        placeholder={aiConfig.hasApiKey ? 'Enter new key to replace…' : 'sk-...'}
+                        value={apiKeyInput}
+                        onChange={e => setApiKeyInput(e.target.value)}
+                      />
+                    </label>
+                    <div className="export-actions">
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={!apiKeyInput.trim() || busy === 'save-ai'}
+                        onClick={() => void saveAiSettings('cloud-codex', aiConfig.model, apiKeyInput)}
+                      >
+                        Save key
+                      </button>
+                      {aiConfig.hasApiKey && (
+                        <button
+                          type="button"
+                          className="filter-button"
+                          disabled={busy === 'save-ai'}
+                          onClick={() => void saveAiSettings('cloud-codex', aiConfig.model, undefined, true)}
+                        >
+                          Clear key
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>}
             {aiHealth && <div className="settings-row">
               <div>
-                <strong>Local Ollama review engine ({aiHealth.model})</strong>
+                <strong>{aiConfig?.provider === 'cloud-codex' ? `Cloud Codex (${aiHealth.model})` : `Local Ollama review engine (${aiHealth.model})`}</strong>
                 <small>{aiHealth.message}</small>
               </div>
               <button className="filter-button" onClick={() => void refreshAll()} disabled={busy === 'refresh'}>Check status</button>
@@ -686,6 +816,31 @@ function App() {
         </button>
       </div>
     </section></div>}
+    {fixPreview && <div className="overlay" onMouseDown={e => { if (e.target === e.currentTarget) setFixPreview(null) }}><section className="dialog choice-dialog">
+      <div className="dialog-brand">
+        <img className="dialog-logo" src="./logo.png" alt="OSIEN Probe"/>
+        <div>
+          <h2>Codex Fix Preview · {fixPreview.file}</h2>
+          <p>{fixPreview.explanation} ({fixPreview.model})</p>
+        </div>
+      </div>
+      <div className="fix-diff-grid">
+        <div className="fix-diff-pane fix-before">
+          <span>Current code</span>
+          <pre><code>{fixPreview.target}</code></pre>
+        </div>
+        <div className="fix-diff-pane fix-after">
+          <span>Proposed Codex fix</span>
+          <pre><code>{fixPreview.replacement}</code></pre>
+        </div>
+      </div>
+      <div className="dialog-foot">
+        <button className="filter-button" onClick={() => setFixPreview(null)}>Cancel</button>
+        <button className="primary" disabled={busy === `apply:${fixPreview.findingId}`} onClick={() => void confirmApplyFix()}>
+          {busy === `apply:${fixPreview.findingId}` ? 'Applying…' : 'Apply fix to file'}
+        </button>
+      </div>
+    </section></div>}
     {extremeChoice && <div className="overlay" onMouseDown={e => { if (e.target === e.currentTarget) setExtremeChoice(null) }}><section className="dialog choice-dialog">
       <div className="dialog-brand">
         <img className="dialog-logo" src="./logo.png" alt="OSIEN Probe"/>
@@ -725,7 +880,9 @@ function FindingList({
   projects,
   busy,
   bridge,
+  isCloudCodex,
   onVerify,
+  onFix,
   onExport,
   onOpen,
 }: {
@@ -733,7 +890,9 @@ function FindingList({
   projects: Project[]
   busy: string
   bridge?: Bridge
+  isCloudCodex: boolean
   onVerify(projectId: string, findingId: string): void
+  onFix(projectId: string, findingId: string): void
   onExport(format: 'sarif' | 'markdown' | 'json', projectId?: string): void
   onOpen(p: Project): void
 }) {
@@ -896,6 +1055,17 @@ function FindingList({
             {f.ruleId && <button className="filter-button" onClick={() => void copySuppression(f.ruleId)}>
               {copiedRule === f.ruleId ? 'Copied directive' : `Copy suppress (${f.ruleId})`}
             </button>}
+            {isCloudCodex && (f.fixed ? (
+              <span className="fixed-badge">Fixed ✓</span>
+            ) : (
+              <button
+                className="filter-button fix-finding-btn"
+                disabled={busy === `fix:${f.id}`}
+                onClick={() => onFix(f.projectId, f.id)}
+              >
+                {busy === `fix:${f.id}` ? 'Generating fix…' : 'Fix finding'}
+              </button>
+            ))}
           </div>
           {isExpanded && <div className="context-inspector">
             {ctx?.lines ? <pre className="context-code">{ctx.lines.map(line => (

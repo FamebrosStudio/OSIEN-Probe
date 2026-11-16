@@ -120,3 +120,48 @@ test('checkAiHealth reports online and model installation status', async () => {
   assert.equal(offline.available, false);
   assert.equal(offline.modelInstalled, false);
 });
+
+test('Cloud Codex provider supports health, fix generation, and safe file patching', async () => {
+  const { generateFindingFix, applyFindingFix, CODEX_MODELS } = require('../electron/ai-review.cjs');
+  const noKey = await checkAiHealth({ provider: 'cloud-codex', apiKey: '' });
+  assert.equal(noKey.available, false);
+  assert.equal(noKey.provider, 'cloud-codex');
+
+  const withKey = await checkAiHealth({ provider: 'cloud-codex', apiKey: 'sk-test-1234', model: CODEX_MODELS[0] });
+  assert.equal(withKey.available, true);
+  assert.equal(withKey.modelInstalled, true);
+
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'osien-codex-fix-'));
+  await fs.writeFile(path.join(root, 'app.js'), 'el.innerHTML = userBio;\n', 'utf8');
+  const finding = { id: 'f1', title: 'Direct innerHTML', severity: 'high', cwe: 'CWE-79', ruleId: 'js-innerhtml', file: 'app.js', line: 1, excerpt: 'el.innerHTML = userBio;' };
+
+  const patch = await generateFindingFix(root, finding, {
+    provider: 'cloud-codex',
+    apiKey: 'sk-test-1234',
+    model: CODEX_MODELS[0],
+    fetch: async (_url, init) => {
+      assert.equal(init.headers.authorization, 'Bearer sk-test-1234');
+      return {
+        ok: true,
+        json: async () => ({
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                explanation: 'Use textContent to avoid HTML injection.',
+                target: 'el.innerHTML = userBio;',
+                replacement: 'el.textContent = userBio;',
+              }),
+            },
+          }],
+        }),
+      };
+    },
+  });
+  assert.equal(patch.replacement, 'el.textContent = userBio;');
+
+  await applyFindingFix(root, 'app.js', patch.target, patch.replacement);
+  const updated = await fs.readFile(path.join(root, 'app.js'), 'utf8');
+  assert.equal(updated, 'el.textContent = userBio;\n');
+
+  await assert.rejects(() => applyFindingFix(root, '../outside.js', 'a', 'b'), /escapes/);
+});

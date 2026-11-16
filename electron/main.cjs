@@ -9,10 +9,37 @@ const execFileAsync = promisify(execFile);
 const ipc = typeof ipcMain?.handle === 'function' ? ipcMain.handle.bind(ipcMain) : () => {};
 const { scanProjectRoot, toSarifReport, toMarkdownReport, kinds } = require('./scanner.cjs');
 const { shared, categoryRules } = require('./rules.cjs');
-const { verifyFinding, reviewFindings, getSourceContext, checkAiHealth } = require('./ai-review.cjs');
+const { verifyFinding, reviewFindings, getSourceContext, checkAiHealth, generateFindingFix, applyFindingFix, PREFERRED_CODING_MODELS, CODEX_MODELS, MODEL } = require('./ai-review.cjs');
 const { getSystemProfile, runExtremeTest, stopExtremeTest } = require('./extreme-tester.cjs');
 const isInside = (root, target) => { const rel = path.relative(root, target); return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel)); };
 const statePath = () => path.join(app.getPath('userData'), 'deepcheck-projects.json');
+const aiConfigPath = () => path.join(app.getPath('userData'), 'osien-ai-config.json');
+async function readAiConfig() {
+  try {
+    const raw = JSON.parse(await fs.readFile(aiConfigPath(), 'utf8'));
+    return {
+      provider: raw.provider === 'cloud-codex' ? 'cloud-codex' : 'local',
+      model: String(raw.model || (raw.provider === 'cloud-codex' ? CODEX_MODELS[0] : MODEL)),
+      apiKey: String(raw.apiKey || ''),
+    };
+  } catch {
+    return { provider: 'local', model: MODEL, apiKey: '' };
+  }
+}
+async function saveAiConfig(cfg) {
+  await fs.mkdir(path.dirname(aiConfigPath()), { recursive: true });
+  await fs.writeFile(aiConfigPath(), JSON.stringify(cfg, null, 2), 'utf8');
+}
+function publicAiConfig(cfg) {
+  return {
+    provider: cfg.provider,
+    model: cfg.model,
+    hasApiKey: Boolean(cfg.apiKey),
+    apiKeyMasked: cfg.apiKey ? `${cfg.apiKey.slice(0, 5)}…${cfg.apiKey.slice(-4)}` : '',
+    localModels: PREFERRED_CODING_MODELS,
+    codexModels: CODEX_MODELS,
+  };
+}
 async function readProjects() { try { return JSON.parse(await fs.readFile(statePath(), 'utf8')); } catch { return []; } }
 async function saveProjects(projects) { await fs.mkdir(path.dirname(statePath()), { recursive: true }); await fs.writeFile(statePath(), JSON.stringify(projects, null, 2), 'utf8'); }
 function createWindow() {
@@ -131,7 +158,11 @@ function startBackgroundReview(projectId, root, scan) {
   if (!queue.length) { reviewJobs.delete(projectId); progress('idle'); return; }
   progress('running');
   (async () => {
+    const aiCfg = await readAiConfig();
     await reviewFindings(root, queue, {
+      provider: aiCfg.provider,
+      model: aiCfg.model,
+      apiKey: aiCfg.apiKey,
       shouldStop: () => job.cancelled,
       onFinding: async (finding) => {
         if (job.cancelled) return;
@@ -165,7 +196,8 @@ ipc('verify-finding', async (_event, payload) => {
   if (!project?.latestRun) throw new Error('Scan this project before verifying a finding.');
   const finding = project.latestRun.findings.find((item) => item.id === findingId);
   if (!finding) throw new Error('Finding is no longer present in the latest scan. Run a fresh scan.');
-  const assessment = await verifyFinding(project.root, finding);
+  const aiCfg = await readAiConfig();
+  const assessment = await verifyFinding(project.root, finding, { provider: aiCfg.provider, model: aiCfg.model, apiKey: aiCfg.apiKey });
   await withProjects((fresh) => {
     const stored = fresh.find((p) => p.id === projectId)?.latestRun?.findings.find((f) => f.id === findingId);
     if (!stored) return false;
@@ -184,7 +216,46 @@ ipc('get-finding-context', async (_event, payload) => {
   if (!finding) throw new Error('Finding is no longer present in the latest scan.');
   return getSourceContext(project.root, finding.file, finding.line, 6);
 });
-ipc('check-ai-status', async () => checkAiHealth());
+ipc('check-ai-status', async () => {
+  const aiCfg = await readAiConfig();
+  return checkAiHealth({ provider: aiCfg.provider, model: aiCfg.model, apiKey: aiCfg.apiKey });
+});
+ipc('get-ai-config', async () => publicAiConfig(await readAiConfig()));
+ipc('save-ai-config', async (_event, payload) => {
+  const current = await readAiConfig();
+  const provider = payload?.provider === 'cloud-codex' ? 'cloud-codex' : 'local';
+  const model = String(payload?.model || (provider === 'cloud-codex' ? CODEX_MODELS[0] : MODEL)).trim();
+  const nextKey = typeof payload?.apiKey === 'string' && payload.apiKey.trim()
+    ? payload.apiKey.trim()
+    : (payload?.clearApiKey ? '' : current.apiKey);
+  const next = { provider, model, apiKey: nextKey };
+  await saveAiConfig(next);
+  return { config: publicAiConfig(next), health: await checkAiHealth(next) };
+});
+ipc('generate-finding-fix', async (_event, payload) => {
+  const { projectId, findingId } = payload || {};
+  const aiCfg = await readAiConfig();
+  const projects = await readProjects();
+  const project = projects.find((item) => item.id === projectId);
+  if (!project?.latestRun) throw new Error('Scan this project before fixing a finding.');
+  const finding = project.latestRun.findings.find((item) => item.id === findingId);
+  if (!finding) throw new Error('Finding is no longer present in the latest scan.');
+  return generateFindingFix(project.root, finding, { provider: aiCfg.provider, model: aiCfg.model, apiKey: aiCfg.apiKey });
+});
+ipc('apply-finding-fix', async (_event, payload) => {
+  const { projectId, findingId, file, target, replacement } = payload || {};
+  const projects = await readProjects();
+  const project = projects.find((item) => item.id === projectId);
+  if (!project) throw new Error('Project not found');
+  const res = await applyFindingFix(project.root, file, target, replacement);
+  await withProjects((fresh) => {
+    const stored = fresh.find((p) => p.id === projectId)?.latestRun?.findings.find((f) => f.id === findingId);
+    if (!stored) return false;
+    stored.fixed = true;
+    return true;
+  });
+  return res;
+});
 ipc('get-system-profile', async () => getSystemProfile());
 ipc('start-extreme-test', async (_event, projectId) => {
   const projects = await readProjects();
