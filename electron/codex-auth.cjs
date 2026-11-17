@@ -69,11 +69,13 @@ async function getAvailableCodexModels() {
 
 function spawnCodex(args, options = {}) {
   const cachedScript = findCachedCodexScript();
+  const childEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
   if (cachedScript) {
     return spawn(process.execPath, [cachedScript, ...args], {
       cwd: options.cwd || os.homedir(),
       windowsHide: options.windowsHide !== false,
-      env: process.env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: childEnv,
     });
   }
   const joined = args.map((a) => (/[\s"]/g.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(' ');
@@ -81,13 +83,15 @@ function spawnCodex(args, options = {}) {
     return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', `npx.cmd --yes @openai/codex ${joined}`], {
       cwd: options.cwd || os.homedir(),
       windowsHide: options.windowsHide !== false,
-      env: process.env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: childEnv,
     });
   }
   return spawn('npx', ['--yes', '@openai/codex', ...args], {
     cwd: options.cwd || os.homedir(),
     windowsHide: options.windowsHide !== false,
-    env: process.env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: childEnv,
   });
 }
 
