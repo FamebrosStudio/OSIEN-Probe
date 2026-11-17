@@ -293,24 +293,49 @@ ipc('fix-all-findings', async (_event, payload) => {
   if (!project?.latestRun) throw new Error('Scan this project before fixing findings.');
   const queue = project.latestRun.findings
     .filter((f) => !f.fixed && ['critical', 'high', 'medium'].includes(f.severity));
+  const byFile = new Map();
+  for (const finding of queue) {
+    const key = finding.file || '';
+    if (!byFile.has(key)) byFile.set(key, []);
+    byFile.get(key).push(finding);
+  }
+  const fileGroups = [...byFile.values()];
+  const concurrency = Math.min(6, Math.max(1, fileGroups.length));
+  const fixedIds = new Set();
+  let cursor = 0;
+  let done = 0;
   let fixed = 0;
   let failed = 0;
-  for (let i = 0; i < queue.length; i++) {
-    const finding = queue[i];
-    broadcast('fix-all-progress', { projectId, total: queue.length, done: i, fixed, failed, currentTitle: finding.title, state: 'running' });
-    try {
-      const patch = await generateFindingFix(project.root, finding, { provider: aiCfg.provider, model: aiCfg.model, apiKey: aiCfg.apiKey });
-      await applyFindingFix(project.root, patch.file, patch.target, patch.replacement);
-      fixed++;
-      await withProjects((fresh) => {
-        const stored = fresh.find((p) => p.id === projectId)?.latestRun?.findings.find((f) => f.id === finding.id);
-        if (!stored) return false;
-        stored.fixed = true;
-        return true;
-      });
-    } catch {
-      failed++;
+  broadcast('fix-all-progress', { projectId, total: queue.length, done: 0, fixed: 0, failed: 0, currentTitle: queue[0]?.title || '', state: 'running' });
+
+  const worker = async () => {
+    while (cursor < fileGroups.length) {
+      const group = fileGroups[cursor++];
+      for (const finding of group) {
+        try {
+          const patch = await generateFindingFix(project.root, finding, { provider: aiCfg.provider, model: aiCfg.model, apiKey: aiCfg.apiKey });
+          await applyFindingFix(project.root, patch.file, patch.target, patch.replacement);
+          fixed++;
+          fixedIds.add(finding.id);
+        } catch {
+          failed++;
+        }
+        done++;
+        broadcast('fix-all-progress', { projectId, total: queue.length, done, fixed, failed, currentTitle: finding.title, state: 'running' });
+      }
     }
+  };
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
+
+  if (fixedIds.size > 0) {
+    await withProjects((fresh) => {
+      const storedFindings = fresh.find((p) => p.id === projectId)?.latestRun?.findings;
+      if (!storedFindings) return false;
+      for (const item of storedFindings) {
+        if (fixedIds.has(item.id)) item.fixed = true;
+      }
+      return true;
+    });
   }
   broadcast('fix-all-progress', { projectId, total: queue.length, done: queue.length, fixed, failed, currentTitle: '', state: 'done' });
   return { total: queue.length, fixed, failed };
