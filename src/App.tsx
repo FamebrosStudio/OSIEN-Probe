@@ -372,7 +372,7 @@ function App() {
   }, [bridge])
   const fixAllWithAi = (p: Project) => {
     if (!bridge?.fixAllFindings || !p.latestRun) return
-    const count = Math.min(15, p.latestRun.findings.filter(f => !f.fixed && ['critical', 'high', 'medium'].includes(f.severity)).length)
+    const count = p.latestRun.findings.filter(f => !f.fixed && ['critical', 'high', 'medium'].includes(f.severity)).length
     if (!count) {
       setMessage('No unfixed critical, high, or medium findings remain in this project.')
       return

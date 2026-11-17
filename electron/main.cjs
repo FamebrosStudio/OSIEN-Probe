@@ -292,8 +292,7 @@ ipc('fix-all-findings', async (_event, payload) => {
   const project = projects.find((item) => item.id === projectId);
   if (!project?.latestRun) throw new Error('Scan this project before fixing findings.');
   const queue = project.latestRun.findings
-    .filter((f) => !f.fixed && ['critical', 'high', 'medium'].includes(f.severity))
-    .slice(0, 15);
+    .filter((f) => !f.fixed && ['critical', 'high', 'medium'].includes(f.severity));
   let fixed = 0;
   let failed = 0;
   for (let i = 0; i < queue.length; i++) {
