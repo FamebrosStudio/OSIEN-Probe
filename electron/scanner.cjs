@@ -308,7 +308,7 @@ function scoreFor(findings) {
   return Math.max(1, Math.round((100 * 100) / (100 + penalty)));
 }
 
-const USER_INPUT = /(?:req\.(?:body|query|params|headers|cookies)|request\.(?:body|query|params|headers|cookies)|searchParams\.|URLSearchParams|location\.(?:search|hash)|event\.target\.value|e\.target\.value|process\.argv|stdin|userInput|user_input|untrusted|payload|message)/i;
+const USER_INPUT = /(?:req\.(?:body|query|params|headers|cookies)|request\.(?:body|query|params|headers|cookies)|searchParams\.|URLSearchParams|location\.(?:search|hash)|event\.target\.value|e\.target\.value|stdin|userInput|user_input|untrusted|payload|message)/i;
 const INPUT_NAME = /(?:user|input|query|param|request|payload|message|comment|content|body|search|value)/i;
 const SANITIZER = /\b(?:DOMPurify\.sanitize|sanitizeHtml|escapeHtml|escapeRegExp|encodeURIComponent|encodeURI|Number|parseInt|parseFloat|Boolean|validator\.escape|path\.basename|pick|omit|html\.escape|shlex\.quote|ast\.literal_eval)\s*\(/;
 

@@ -154,3 +154,24 @@ test('clean modern browser ESM, Web APIs, JSON-LD, canonical links, and CSS over
   const hits = result.findings.filter((f) => badIds.has(f.ruleId));
   assert.deepEqual(hits, [], `Unexpected false positives: ${JSON.stringify(hits)}`);
 });
+
+test('Web media APIs and CLI argv file reads produce zero false positives and no duplicate inline-onclick rule', async () => {
+  const result = await scanClean({
+    'index.html': '<link rel="stylesheet" href="/app.css" media="print" onload="this.media=\'all\'" />',
+    'media.js': [
+      'export async function decode(blob, el) {',
+      '  const bmp = await createImageBitmap(blob);',
+      '  return el instanceof HTMLMediaElement ? bmp : null;',
+      '}',
+    ].join('\n'),
+    'cli.mjs': [
+      'import fs from "node:fs";',
+      'const sourcePath = process.argv[2];',
+      'export const text = fs.readFileSync(sourcePath, "utf8");',
+    ].join('\n'),
+  }, 'Website');
+
+  const badIds = new Set(['js-undeclared-var', 'js-path-traversal', 'html-inline-onclick']);
+  const hits = result.findings.filter((f) => badIds.has(f.ruleId));
+  assert.deepEqual(hits, [], `Unexpected false positives: ${JSON.stringify(hits)}`);
+});

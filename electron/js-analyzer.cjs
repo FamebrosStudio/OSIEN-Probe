@@ -2,7 +2,7 @@
 
 const { parse } = require('@babel/parser');
 
-const USER_INPUT = /(?:req\.(?:body|query|params|headers|cookies)|request\.(?:body|query|params|headers|cookies)|searchParams\.|URLSearchParams|location\.(?:search|hash)|event\.target\.value|e\.target\.value|process\.argv|stdin|userInput|user_input|untrusted|payload|message)/i;
+const USER_INPUT = /(?:req\.(?:body|query|params|headers|cookies)|request\.(?:body|query|params|headers|cookies)|searchParams\.|URLSearchParams|location\.(?:search|hash)|event\.target\.value|e\.target\.value|stdin|userInput|user_input|untrusted|payload|message)/i;
 const SANITIZER = /\b(?:DOMPurify\.sanitize|sanitizeHtml|escapeHtml|escapeRegExp|encodeURIComponent|encodeURI|Number|parseInt|parseFloat|Boolean|validator\.escape|path\.basename|pick|omit|html\.escape|shlex\.quote|ast\.literal_eval)\s*\(/;
 const SENSITIVE_NAME = /(?:password|passwd|pwd|secret|token|api[_-]?key|private[_-]?key|jwt|credential|auth[_-]?header|session[_-]?id)/i;
 const SECRET_FN_NAME = /(?:token|secret|password|salt|nonce|key|session|otp|auth|csrf|uuid)/i;
@@ -26,9 +26,10 @@ const KNOWN_GLOBALS = new Set([
   'EventTarget', 'NodeList', 'DOMParser', 'XMLSerializer', 'getSelection', 'scrollTo', 'scrollBy',
   'Float32Array', 'Float64Array', 'Int16Array', 'Uint16Array', 'Int32Array', 'Uint32Array', 'Uint8ClampedArray',
   'ArrayBuffer', 'SharedArrayBuffer', 'DataView', 'indexedDB', 'Image', 'Audio', 'Option',
-  'HTMLCanvasElement', 'HTMLImageElement', 'HTMLVideoElement', 'HTMLAudioElement', 'HTMLInputElement',
-  'MediaRecorder', 'MediaStream', 'AudioContext', 'OfflineAudioContext', 'WebSocket', 'EventSource',
+  'HTMLCanvasElement', 'HTMLImageElement', 'HTMLVideoElement', 'HTMLAudioElement', 'HTMLInputElement', 'HTMLMediaElement',
+  'MediaRecorder', 'MediaStream', 'AudioContext', 'OfflineAudioContext', 'AudioBuffer', 'WebSocket', 'EventSource',
   'Worker', 'SharedWorker', 'BroadcastChannel', 'Notification', 'Storage', 'screen', 'devicePixelRatio', 'CSS',
+  'createImageBitmap', 'OffscreenCanvas', 'Path2D', 'FontFace', 'PerformanceObserver', 'ResizeObserver', 'IntersectionObserver', 'MutationObserver',
 ]);
 
 function staticText(node) {
