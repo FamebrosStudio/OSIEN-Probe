@@ -132,12 +132,20 @@ function killProcessTree(child) {
   try {
     if (process.platform === 'win32' && child.pid) {
       spawn('taskkill', ['/pid', String(child.pid), '/t', '/f'], { windowsHide: true });
+    } else if (child.pid) {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        child.kill('SIGKILL');
+      }
     } else {
-      child.kill('SIGTERM');
+      child.kill('SIGKILL');
     }
   } catch {
     // Process may already have exited.
   }
+  if (child.stdout && !child.stdout.destroyed) child.stdout.destroy();
+  if (child.stderr && !child.stderr.destroyed) child.stderr.destroy();
 }
 
 const ANSI_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*[A-Za-z]`, 'g');
@@ -174,6 +182,7 @@ function startNpmSandboxServer(root, scriptName, onLog) {
       : spawn('npm', ['run', scriptName], {
           cwd: root,
           windowsHide: true,
+          detached: true,
           env,
         });
 
