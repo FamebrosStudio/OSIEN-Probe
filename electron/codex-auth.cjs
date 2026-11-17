@@ -7,6 +7,7 @@ const os = require('node:os');
 const { spawn } = require('node:child_process');
 
 let cachedCodexScript = null;
+let cachedCodexBinary = null;
 
 function codexDir() {
   return path.join(os.homedir(), '.codex');
@@ -18,6 +19,46 @@ function codexAuthFile() {
 
 function codexModelsCacheFile() {
   return path.join(codexDir(), 'models_cache.json');
+}
+
+function findCachedCodexBinary() {
+  if (cachedCodexBinary && fsSync.existsSync(cachedCodexBinary)) return cachedCodexBinary;
+  const npxRoots = [
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'npm-cache', '_npx') : null,
+    path.join(os.homedir(), '.npm', '_npx'),
+  ].filter(Boolean);
+
+  const relCandidates = process.platform === 'win32'
+    ? [
+        path.join('@openai', 'codex-win32-x64', 'vendor', 'x86_64-pc-windows-msvc', 'bin', 'codex.exe'),
+        path.join('@openai', 'codex-win32-arm64', 'vendor', 'aarch64-pc-windows-msvc', 'bin', 'codex.exe'),
+      ]
+    : process.platform === 'darwin'
+      ? [
+          path.join('@openai', 'codex-darwin-arm64', 'vendor', 'aarch64-apple-darwin', 'bin', 'codex'),
+          path.join('@openai', 'codex-darwin-x64', 'vendor', 'x86_64-apple-darwin', 'bin', 'codex'),
+        ]
+      : [
+          path.join('@openai', 'codex-linux-x64', 'vendor', 'x86_64-unknown-linux-musl', 'bin', 'codex'),
+          path.join('@openai', 'codex-linux-arm64', 'vendor', 'aarch64-unknown-linux-musl', 'bin', 'codex'),
+        ];
+
+  for (const root of npxRoots) {
+    try {
+      for (const entry of fsSync.readdirSync(root)) {
+        for (const rel of relCandidates) {
+          const candidate = path.join(root, entry, 'node_modules', rel);
+          if (fsSync.existsSync(candidate)) {
+            cachedCodexBinary = candidate;
+            return candidate;
+          }
+        }
+      }
+    } catch {
+      // Directory may not exist yet.
+    }
+  }
+  return null;
 }
 
 function findCachedCodexScript() {
@@ -68,8 +109,17 @@ async function getAvailableCodexModels() {
 }
 
 function spawnCodex(args, options = {}) {
-  const cachedScript = findCachedCodexScript();
+  const nativeBin = findCachedCodexBinary();
   const childEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+  if (nativeBin) {
+    return spawn(nativeBin, args, {
+      cwd: options.cwd || os.homedir(),
+      windowsHide: options.windowsHide !== false,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: childEnv,
+    });
+  }
+  const cachedScript = findCachedCodexScript();
   if (cachedScript) {
     return spawn(process.execPath, [cachedScript, ...args], {
       cwd: options.cwd || os.homedir(),
