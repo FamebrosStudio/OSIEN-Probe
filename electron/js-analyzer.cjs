@@ -1003,7 +1003,9 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       if (name === 'catch' && !(parent?.type === 'MemberExpression' && parentKey === 'object')
         && node.arguments[0] && (node.arguments[0].type === 'ArrowFunctionExpression' || node.arguments[0].type === 'FunctionExpression')) {
         const cb = node.arguments[0];
-        if (cb.body?.type === 'BlockStatement' && cb.body.body.length === 0) {
+        const recvSrc = node.callee?.object ? raw.slice(node.callee.object.start, node.callee.object.end) : '';
+        const isBestEffortCleanup = /\.(?:unlink|rm|rmdir|close|cancel|stop|pause|play|resume|remove|revokeObjectURL|scrollTo)\s*\(/i.test(recvSrc);
+        if (cb.body?.type === 'BlockStatement' && cb.body.body.length === 0 && !isBestEffortCleanup) {
           emit({
             id: 'js-empty-promise-catch',
             title: 'Empty Promise .catch() handler',

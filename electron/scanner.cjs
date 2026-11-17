@@ -618,9 +618,15 @@ function scanFileContent(raw, rel, extName, lang, catalog, applicableByLang) {
     if (!suppressed(suppressions, 1, rule.id)) findings.push(makeFinding(rule, rel, 1, lines[0]));
   }
 
+  const isScriptOrTest = TEST_FILE_PATH.test(rel) || /(?:^|[\\/])scripts?[\\/]/i.test(rel);
+  const perFileNoisyRules = new Set(['css-important', 'css-transition-all', 'css-fixed-height', 'css-user-select-none', 'css-outline-none', 'js-console-log', 'js-todo', 'js-commented-code']);
+  const BEST_EFFORT_CATCH_RE = /\b(?:localStorage|sessionStorage|history\.pushState|scrollTo|unlink|rmSync|rmdirSync|revokeObjectURL|recorder\.stop|audioCtx|video\.play|video\.pause)\b/;
+
   for (const rule of applicable) {
     if (rule.id === 'secret-generic-credential' && TEST_FILE_PATH.test(rel)) continue;
+    if (isScriptOrTest && (rule.id === 'js-console-log' || rule.id === 'js-sync-io')) continue;
     if (rule.absent && rule.absent.test(raw)) continue;
+    let ruleHitsInFile = 0;
     const isCodeView = rule.view === 'code';
     const isRawCode = rule.view === 'raw' || rawCodeRuleIds.has(rule.id);
     const searchLines = isCodeView
@@ -680,12 +686,18 @@ function scanFileContent(raw, rel, extName, lang, catalog, applicableByLang) {
         const lookahead = rawSearchLines.slice(i + 1, i + 6).join('\n');
         if (new RegExp('\\.catch\\b').test(lookahead)) continue;
       }
+      if (rule.id === 'js-empty-catch') {
+        const ctxWindow = rawSearchLines.slice(Math.max(0, i - 2), i + 1).join(' ');
+        if (BEST_EFFORT_CATCH_RE.test(ctxWindow)) continue;
+      }
+      if (perFileNoisyRules.has(rule.id) && ruleHitsInFile >= 3) break;
       const context = contextFor(rule, lines[i], taint.byLine[i] || new Set(), lines, i);
       if (!context.report) continue;
       const key = `${rel}:${i + 1}`;
       if (foundLines.has(key)) continue;
       if (findings.some((existing) => existing.ruleId === rule.id && existing.file === rel && existing.line === i + 1)) continue;
       foundLines.add(key);
+      ruleHitsInFile++;
       findings.push(makeFinding(rule, rel, i + 1, lines[i], context));
     }
   }

@@ -175,3 +175,30 @@ test('Web media APIs and CLI argv file reads produce zero false positives and no
   const hits = result.findings.filter((f) => badIds.has(f.ruleId));
   assert.deepEqual(hits, [], `Unexpected false positives: ${JSON.stringify(hits)}`);
 });
+
+test('noise reduction: skips CLI/test logging & sync IO, Google Fonts SRI, prose comments, cleanup catches, and caps CSS style repeats', async () => {
+  const result = await scanClean({
+    'index.html': '<link href="https://fonts.googleapis.com/css2?family=Poppins" rel="stylesheet" />',
+    'scripts/import.mjs': [
+      'import fs from "node:fs";',
+      'const text = fs.readFileSync("data.json", "utf8");',
+      'console.log("Imported", text.length);',
+    ].join('\n'),
+    'app.js': [
+      '"use strict";',
+      '// for legacy uploads and small cover images.',
+      '// while page-first matching is preserved whenever a page exists.',
+      'export async function save(fs, tmp) {',
+      '  try { localStorage.setItem("stage", "1"); } catch {}',
+      '  await fs.unlink(tmp).catch(() => {});',
+      '}',
+    ].join('\n'),
+    'theme.css': Array.from({ length: 10 }, (_, i) => `.c${i} { color: #fff !important; }`).join('\n'),
+  }, 'Website');
+
+  const forbidden = new Set(['html-link-no-integrity', 'js-console-log', 'js-sync-io', 'js-commented-code', 'js-empty-catch', 'js-empty-promise-catch']);
+  const bad = result.findings.filter((f) => forbidden.has(f.ruleId));
+  assert.deepEqual(bad, [], `Unexpected noisy findings: ${JSON.stringify(bad)}`);
+  const importantHits = result.findings.filter((f) => f.ruleId === 'css-important');
+  assert.ok(importantHits.length <= 3, `Expected css-important capped at <= 3, got ${importantHits.length}`);
+});
