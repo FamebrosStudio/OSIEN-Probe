@@ -1,0 +1,464 @@
+'use strict';
+
+const path = require('node:path');
+const { parse } = require('@babel/parser');
+
+const REQUEST_TAINT_RE = /(?:req\.(?:body|query|params|headers|cookies)|request\.(?:body|query|params|headers|cookies)|searchParams\.|URLSearchParams|location\.(?:search|hash)|event\.target\.value|e\.target\.value)/i;
+const SANITIZER_RE = /\b(?:DOMPurify\.sanitize|sanitizeHtml|escapeHtml|escapeRegExp|encodeURIComponent|encodeURI|Number|parseInt|parseFloat|Boolean|validator\.escape|path\.basename|pick|omit|isWithin)\s*\(/;
+const FILE_SINKS = new Set(['readFile', 'readFileSync', 'createReadStream', 'sendFile', 'download', 'writeFile', 'writeFileSync', 'unlink', 'unlinkSync', 'open', 'openSync', 'copyFile', 'rename']);
+const SQL_SINKS = new Set(['query', 'execute', 'raw']);
+const SHELL_SINKS = new Set(['exec', 'execSync', 'spawn', 'spawnSync']);
+const AUTH_MW_RE = /(?:auth|authenticate|requireAuth|ensureAuth|isAuthenticated|verifyToken|verifySession|checkAuth|protect|requireUser|requireAdmin|jwt)/i;
+const PUBLIC_ROUTE_RE = /\/(?:login|signin|sign-in|signup|sign-up|register|auth|oauth|webhook|callback|health|ping|public|reset-password|forgot-password)\b/i;
+
+function parseJsAst(raw, extName) {
+  const plugins = ['jsx', 'decorators-legacy', 'classProperties', 'dynamicImport', 'optionalChaining', 'nullishCoalescingOperator', 'topLevelAwait'];
+  if (extName === '.ts' || extName === '.tsx') plugins.push('typescript');
+  try {
+    return parse(raw, { sourceType: 'unambiguous', errorRecovery: true, plugins });
+  } catch {
+    return null;
+  }
+}
+
+function walk(node, fn, parent = null) {
+  if (!node || typeof node !== 'object') return;
+  fn(node, parent);
+  for (const key of Object.keys(node)) {
+    if (key === 'loc' || key === 'start' || key === 'end' || key === 'extra') continue;
+    const val = node[key];
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        if (item && typeof item.type === 'string') walk(item, fn, node);
+      }
+    } else if (val && typeof val.type === 'string') {
+      walk(val, fn, node);
+    }
+  }
+}
+
+function memberTail(node) {
+  if (!node) return '';
+  if (node.type === 'Identifier') return node.name;
+  if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
+    return node.property?.name || '';
+  }
+  return '';
+}
+
+function memberPath(node) {
+  if (!node) return '';
+  if (node.type === 'Identifier') return node.name;
+  if (node.type === 'MemberExpression' || node.type === 'OptionalMemberExpression') {
+    const obj = memberPath(node.object);
+    const prop = node.property?.name || '';
+    return obj && prop ? `${obj}.${prop}` : prop || obj;
+  }
+  return '';
+}
+
+function resolveImportPath(fromRel, spec) {
+  if (!spec || (!spec.startsWith('./') && !spec.startsWith('../'))) return '';
+  const dir = path.posix.dirname(fromRel.replace(/\\/g, '/'));
+  const joined = path.posix.normalize(path.posix.join(dir, spec));
+  return joined.replace(/\.(?:js|jsx|ts|tsx|mjs|cjs)$/, '');
+}
+
+function stripExt(rel) {
+  return rel.replace(/\\/g, '/').replace(/\.(?:js|jsx|ts|tsx|mjs|cjs)$/, '');
+}
+
+function paramNamesOf(fnNode) {
+  const names = [];
+  for (const p of fnNode?.params || []) {
+    if (p.type === 'Identifier') names.push(p.name);
+    else if (p.type === 'AssignmentPattern' && p.left?.type === 'Identifier') names.push(p.left.name);
+    else names.push(null);
+  }
+  return names;
+}
+
+function inspectFunctionBody(fnNode, raw) {
+  const params = paramNamesOf(fnNode);
+  const paramSinkHits = [];
+  if (!fnNode?.body) return { isAsync: Boolean(fnNode?.async), paramSinkHits };
+
+  walk(fnNode.body, (node) => {
+    if (node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') return;
+    const calleeName = memberTail(node.callee);
+    let sinkKind = '';
+    if (FILE_SINKS.has(calleeName)) sinkKind = `filesystem (${calleeName})`;
+    else if (SQL_SINKS.has(calleeName)) sinkKind = `SQL (${calleeName})`;
+    else if (SHELL_SINKS.has(calleeName)) sinkKind = `command execution (${calleeName})`;
+    else if (calleeName === 'eval') sinkKind = 'eval()';
+    else if (calleeName === 'redirect') sinkKind = 'HTTP redirect';
+    if (!sinkKind) return;
+
+    for (const arg of node.arguments || []) {
+      const argSrc = raw.slice(arg.start, arg.end);
+      if (SANITIZER_RE.test(argSrc)) continue;
+      params.forEach((pName, idx) => {
+        if (!pName) return;
+        const re = new RegExp(`\\b${pName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+        if (re.test(argSrc)) {
+          paramSinkHits.push({ paramIndex: idx, paramName: pName, sinkKind, line: node.loc?.start.line || 1 });
+        }
+      });
+    }
+  });
+
+  return { isAsync: Boolean(fnNode?.async), paramSinkHits };
+}
+
+function analyzeCrossFileProject(jsFiles, helpers) {
+  const { makeFinding, parseSuppressions, isSuppressed } = helpers;
+  const findings = [];
+  let checksRun = 0;
+  if (!Array.isArray(jsFiles) || jsFiles.length === 0) return { findings, checksRun };
+
+  // 1. Parse all JS/TS files once and index exports, routes, API calls, and module-level state.
+  const parsedFiles = [];
+  const exportIndex = new Map(); // moduleKey -> Map<exportName, { file, line, isAsync, paramSinkHits }>
+  const backendRoutes = new Map(); // routePath -> { file, line, bodyKeys: Set<string> }
+  const frontendCalls = []; // { file, line, routePath, keys: string[] }
+
+  for (const entry of jsFiles) {
+    const ast = parseJsAst(entry.raw, entry.extName);
+    if (!ast) continue;
+    const relNorm = entry.rel.replace(/\\/g, '/');
+    const modKey = stripExt(relNorm);
+    const suppressions = parseSuppressions(entry.raw.split(/\r?\n/));
+    const fileExports = new Map();
+    const localFns = new Map();
+
+    // Collect top-level function declarations & variable arrow/function expressions.
+    for (const stmt of ast.program?.body || []) {
+      if (stmt.type === 'FunctionDeclaration' && stmt.id?.name) {
+        localFns.set(stmt.id.name, { node: stmt, line: stmt.loc?.start.line || 1 });
+      } else if (stmt.type === 'VariableDeclaration') {
+        for (const decl of stmt.declarations || []) {
+          if (decl.id?.type === 'Identifier' && decl.init && (decl.init.type === 'ArrowFunctionExpression' || decl.init.type === 'FunctionExpression')) {
+            localFns.set(decl.id.name, { node: decl.init, line: decl.loc?.start.line || 1 });
+          }
+        }
+      } else if (stmt.type === 'ExportNamedDeclaration') {
+        if (stmt.declaration?.type === 'FunctionDeclaration' && stmt.declaration.id?.name) {
+          const info = inspectFunctionBody(stmt.declaration, entry.raw);
+          fileExports.set(stmt.declaration.id.name, { file: entry.rel, line: stmt.declaration.loc?.start.line || 1, ...info });
+        } else if (stmt.declaration?.type === 'VariableDeclaration') {
+          for (const decl of stmt.declaration.declarations || []) {
+            if (decl.id?.type === 'Identifier' && decl.init && (decl.init.type === 'ArrowFunctionExpression' || decl.init.type === 'FunctionExpression')) {
+              const info = inspectFunctionBody(decl.init, entry.raw);
+              fileExports.set(decl.id.name, { file: entry.rel, line: decl.loc?.start.line || 1, ...info });
+            }
+          }
+        }
+      } else if (stmt.type === 'ExportDefaultDeclaration' && stmt.declaration) {
+        const d = stmt.declaration;
+        if (d.type === 'FunctionDeclaration' || d.type === 'ArrowFunctionExpression' || d.type === 'FunctionExpression') {
+          const info = inspectFunctionBody(d, entry.raw);
+          fileExports.set('default', { file: entry.rel, line: d.loc?.start.line || 1, ...info });
+        } else if (d.type === 'Identifier' && localFns.has(d.name)) {
+          const fn = localFns.get(d.name);
+          fileExports.set('default', { file: entry.rel, line: fn.line, ...inspectFunctionBody(fn.node, entry.raw) });
+        }
+      }
+    }
+
+    // Also index CommonJS module.exports = { ... } and exports.foo = ...
+    walk(ast, (node) => {
+      if (node.type === 'AssignmentExpression' && node.left?.type === 'MemberExpression') {
+        const leftStr = memberPath(node.left);
+        if (leftStr === 'module.exports' && node.right?.type === 'ObjectExpression') {
+          for (const prop of node.right.properties || []) {
+            if (prop.type !== 'ObjectProperty') continue;
+            const keyName = prop.key?.name || prop.key?.value;
+            if (!keyName) continue;
+            if (prop.value?.type === 'Identifier' && localFns.has(prop.value.name)) {
+              const fn = localFns.get(prop.value.name);
+              fileExports.set(keyName, { file: entry.rel, line: fn.line, ...inspectFunctionBody(fn.node, entry.raw) });
+            } else if (prop.value?.type === 'FunctionExpression' || prop.value?.type === 'ArrowFunctionExpression') {
+              fileExports.set(keyName, { file: entry.rel, line: prop.loc?.start.line || 1, ...inspectFunctionBody(prop.value, entry.raw) });
+            }
+          }
+        } else if ((leftStr.startsWith('exports.') || leftStr.startsWith('module.exports.')) && node.right) {
+          const keyName = node.left.property?.name;
+          if (!keyName) return;
+          if (node.right.type === 'Identifier' && localFns.has(node.right.name)) {
+            const fn = localFns.get(node.right.name);
+            fileExports.set(keyName, { file: entry.rel, line: fn.line, ...inspectFunctionBody(fn.node, entry.raw) });
+          } else if (node.right.type === 'FunctionExpression' || node.right.type === 'ArrowFunctionExpression') {
+            fileExports.set(keyName, { file: entry.rel, line: node.loc?.start.line || 1, ...inspectFunctionBody(node.right, entry.raw) });
+          }
+        }
+      }
+    });
+
+    exportIndex.set(modKey, fileExports);
+    parsedFiles.push({ entry, ast, relNorm, modKey, suppressions });
+  }
+
+  // Helper to emit a finding while honoring inline suppressions.
+  const pushFinding = (pf, spec, line, excerpt, reason) => {
+    if (isSuppressed(pf.suppressions, line, spec.id)) return;
+    findings.push(makeFinding(spec, pf.entry.rel, line, excerpt, reason));
+  };
+
+  // 2. Second pass: cross-file call graph checks, route auth checks, shared async state, TOCTOU, and API contracts.
+  for (const pf of parsedFiles) {
+    const { entry, ast, relNorm } = pf;
+    const raw = entry.raw;
+    const lines = raw.split(/\r?\n/);
+    const isTestOrScript = /(?:^|\/)(?:test|tests|__tests__|spec|scripts)\//i.test(relNorm) || /\.(?:test|spec)\./i.test(relNorm);
+
+    // Map local imported identifier -> exported function metadata.
+    const importedSymbols = new Map();
+    for (const stmt of ast.program?.body || []) {
+      if (stmt.type === 'ImportDeclaration' && stmt.source?.value) {
+        const targetMod = resolveImportPath(relNorm, stmt.source.value);
+        const modExports = exportIndex.get(targetMod) || exportIndex.get(`${targetMod}/index`);
+        if (!modExports) continue;
+        for (const sp of stmt.specifiers || []) {
+          if (sp.type === 'ImportSpecifier') {
+            const expName = sp.imported?.name;
+            if (expName && modExports.has(expName)) importedSymbols.set(sp.local.name, modExports.get(expName));
+          } else if (sp.type === 'ImportDefaultSpecifier' && modExports.has('default')) {
+            importedSymbols.set(sp.local.name, modExports.get('default'));
+          }
+        }
+      } else if (stmt.type === 'VariableDeclaration') {
+        for (const decl of stmt.declarations || []) {
+          const init = decl.init;
+          if (init?.type === 'CallExpression' && init.callee?.name === 'require' && init.arguments?.[0]?.type === 'StringLiteral') {
+            const targetMod = resolveImportPath(relNorm, init.arguments[0].value);
+            const modExports = exportIndex.get(targetMod) || exportIndex.get(`${targetMod}/index`);
+            if (!modExports) continue;
+            if (decl.id?.type === 'ObjectPattern') {
+              for (const prop of decl.id.properties || []) {
+                const keyName = prop.key?.name;
+                const localName = prop.value?.name || keyName;
+                if (keyName && localName && modExports.has(keyName)) importedSymbols.set(localName, modExports.get(keyName));
+              }
+            } else if (decl.id?.type === 'Identifier' && modExports.has('default')) {
+              importedSymbols.set(decl.id.name, modExports.get('default'));
+            }
+          }
+        }
+      }
+    }
+
+    // 2a. Cross-file taint & unawaited async checks.
+    checksRun += 2;
+    if (importedSymbols.size > 0) {
+      walk(ast, (node, parent) => {
+        if (node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') return;
+        if (node.callee?.type !== 'Identifier') return;
+        const targetMeta = importedSymbols.get(node.callee.name);
+        if (!targetMeta) return;
+        const line = node.loc?.start.line || 1;
+        const excerpt = lines[line - 1] || '';
+
+        // Interprocedural taint check
+        if (targetMeta.paramSinkHits?.length) {
+          for (const hit of targetMeta.paramSinkHits) {
+            const arg = node.arguments?.[hit.paramIndex];
+            if (!arg) continue;
+            const argSrc = raw.slice(arg.start, arg.end);
+            if (!SANITIZER_RE.test(argSrc) && REQUEST_TAINT_RE.test(argSrc)) {
+              pushFinding(pf, {
+                id: 'js-crossfile-taint',
+                title: `Cross-file untrusted input reaches ${hit.sinkKind}`,
+                severity: 'high',
+                cwe: 'CWE-20',
+                confidence: 'high',
+                hint: `Validate or sanitize input before passing it to "${node.callee.name}" (${targetMeta.file}:${hit.line}).`,
+              }, line, excerpt, `Request input is passed to "${node.callee.name}", which forwards parameter "${hit.paramName}" into ${hit.sinkKind} at ${targetMeta.file}:${hit.line}.`);
+            }
+          }
+        }
+
+        // Unawaited async cross-file call
+        if (targetMeta.isAsync && parent?.type === 'ExpressionStatement') {
+          pushFinding(pf, {
+            id: 'js-crossfile-unawaited-async',
+            title: `Imported async function "${node.callee.name}" called without await`,
+            severity: 'medium',
+            cwe: 'CWE-252',
+            confidence: 'medium',
+            hint: `Await "${node.callee.name}(...)" or attach .catch() so rejections and ordering bugs are handled.`,
+          }, line, excerpt, `"${node.callee.name}" is declared async in ${targetMeta.file}:${targetMeta.line} but invoked here without await or rejection handling.`);
+        }
+      });
+    }
+
+    // 2b. Express/Fastify route missing auth middleware + backend API route body keys.
+    checksRun++;
+    const routesInFile = [];
+    walk(ast, (node) => {
+      if (node.type !== 'CallExpression') return;
+      const callee = node.callee;
+      if (callee?.type !== 'MemberExpression' || callee.object?.type !== 'Identifier' || callee.property?.type !== 'Identifier') return;
+      const objName = callee.object.name;
+      const method = callee.property.name.toLowerCase();
+      if (!['get', 'post', 'put', 'patch', 'delete'].includes(method)) return;
+      if (!['app', 'router', 'server', 'api'].includes(objName)) return;
+      const routeArg = node.arguments?.[0];
+      if (!routeArg || routeArg.type !== 'StringLiteral' || !routeArg.value.startsWith('/')) return;
+
+      const middlewares = node.arguments.slice(1, -1).map((a) => raw.slice(a.start, a.end));
+      const handler = node.arguments[node.arguments.length - 1];
+      const hasAuth = middlewares.some((m) => AUTH_MW_RE.test(m))
+        || (handler && AUTH_MW_RE.test(raw.slice(handler.start, Math.min(handler.end, handler.start + 300))));
+      const line = node.loc?.start.line || 1;
+      routesInFile.push({ objName, method, routePath: routeArg.value, hasAuth, line, excerpt: lines[line - 1] || '' });
+
+      if (['post', 'put', 'patch'].includes(method) && handler) {
+        const bodyKeys = new Set();
+        const handlerSrc = raw.slice(handler.start, handler.end);
+        for (const m of handlerSrc.matchAll(/\breq\.body\.([a-zA-Z_][a-zA-Z0-9_]*)\b/g)) {
+          bodyKeys.add(m[1]);
+        }
+        if (bodyKeys.size > 0) {
+          backendRoutes.set(routeArg.value, { file: entry.rel, line, bodyKeys });
+        }
+      }
+    });
+
+    if (!isTestOrScript && routesInFile.length >= 3) {
+      const authCount = routesInFile.filter((r) => r.hasAuth).length;
+      if (authCount >= 2) {
+        for (const r of routesInFile) {
+          if (!r.hasAuth && ['post', 'put', 'patch', 'delete'].includes(r.method) && !PUBLIC_ROUTE_RE.test(r.routePath)) {
+            pushFinding(pf, {
+              id: 'js-route-missing-auth',
+              title: `Mutating route ${r.method.toUpperCase()} ${r.routePath} lacks auth middleware`,
+              severity: 'high',
+              cwe: 'CWE-862',
+              confidence: 'medium',
+              hint: 'Add the authentication/authorization middleware used by sibling routes unless this endpoint is intentionally public.',
+            }, r.line, r.excerpt, `${authCount} sibling routes in this file enforce auth middleware, but ${r.method.toUpperCase()} ${r.routePath} has none.`);
+          }
+        }
+      }
+    }
+
+    // Collect frontend fetch('/api/...') JSON body keys for cross-file contract matching.
+    walk(ast, (node) => {
+      if (node.type !== 'CallExpression' || node.callee?.name !== 'fetch') return;
+      const urlArg = node.arguments?.[0];
+      const optsArg = node.arguments?.[1];
+      if (!urlArg || urlArg.type !== 'StringLiteral' || !urlArg.value.startsWith('/api/')) return;
+      if (!optsArg || optsArg.type !== 'ObjectExpression') return;
+      const optsSrc = raw.slice(optsArg.start, optsArg.end);
+      const jsonMatch = optsSrc.match(/JSON\.stringify\s*\(\s*\{([\s\S]{1,400})\}\s*\)/);
+      if (!jsonMatch) return;
+      const keys = [];
+      for (const km of jsonMatch[1].matchAll(/(?:^|[,{])\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*(?::|,|$)/g)) {
+        keys.push(km[1]);
+      }
+      if (keys.length > 0) {
+        frontendCalls.push({ pf, line: node.loc?.start.line || 1, excerpt: lines[(node.loc?.start.line || 1) - 1] || '', routePath: urlArg.value, keys });
+      }
+    });
+
+    // 2c. Module-level mutable `let` shared state race across `await` boundaries.
+    checksRun++;
+    if (!isTestOrScript) {
+      const moduleLetVars = new Set();
+      for (const stmt of ast.program?.body || []) {
+        if (stmt.type === 'VariableDeclaration' && stmt.kind === 'let') {
+          for (const d of stmt.declarations || []) {
+            if (d.id?.type === 'Identifier') moduleLetVars.add(d.id.name);
+          }
+        }
+      }
+      if (moduleLetVars.size > 0) {
+        walk(ast, (node) => {
+          if ((node.type !== 'FunctionDeclaration' && node.type !== 'FunctionExpression' && node.type !== 'ArrowFunctionExpression') || !node.async || !node.body) return;
+          // Look for await followed later in the same function by an assignment to a module-level `let` that was read before the await.
+          const events = [];
+          walk(node.body, (inner) => {
+            if (inner.type === 'AwaitExpression') {
+              events.push({ kind: 'await', pos: inner.start });
+            } else if (inner.type === 'AssignmentExpression' && inner.left?.type === 'Identifier' && moduleLetVars.has(inner.left.name)) {
+              events.push({ kind: 'write', name: inner.left.name, pos: inner.start, line: inner.loc?.start.line || 1 });
+            } else if (inner.type === 'Identifier' && moduleLetVars.has(inner.name)) {
+              events.push({ kind: 'read', name: inner.name, pos: inner.start });
+            }
+          });
+          const firstAwait = events.find((e) => e.kind === 'await');
+          if (!firstAwait) return;
+          for (const vName of moduleLetVars) {
+            const readBefore = events.some((e) => e.kind === 'read' && e.name === vName && e.pos < firstAwait.pos);
+            const writeAfter = events.find((e) => e.kind === 'write' && e.name === vName && e.pos > firstAwait.pos);
+            if (readBefore && writeAfter) {
+              pushFinding(pf, {
+                id: 'js-shared-state-async-race',
+                title: `Module-level "${vName}" read before await and mutated after await`,
+                severity: 'medium',
+                cwe: 'CWE-362',
+                confidence: 'medium',
+                hint: `Concurrent async calls can interleave across the await and overwrite "${vName}". Keep state request-scoped or guard with a mutex/queue.`,
+              }, writeAfter.line, lines[writeAfter.line - 1] || '', `Shared module variable "${vName}" is read before an await and written afterward inside an async function.`);
+            }
+          }
+        });
+      }
+    }
+
+    // 2d. TOCTOU fs.existsSync check-then-use in non-test, non-CLI-script code.
+    checksRun++;
+    if (!isTestOrScript) {
+      walk(ast, (node) => {
+        if (node.type !== 'IfStatement' || !node.consequent) return;
+        const testSrc = raw.slice(node.test.start, node.test.end);
+        const existsMatch = testSrc.match(/\b(?:fs\.)?existsSync\s*\(\s*([a-zA-Z_$][a-zA-Z0-9_$.]*)\s*\)/);
+        if (!existsMatch) return;
+        const targetVar = existsMatch[1];
+        const bodySrc = raw.slice(node.consequent.start, node.consequent.end);
+        const escaped = targetVar.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (new RegExp(`\\b(?:fs\\.)?(?:readFileSync|writeFileSync|unlinkSync|rmSync|openSync)\\s*\\(\\s*${escaped}\\b`).test(bodySrc)) {
+          const line = node.loc?.start.line || 1;
+          pushFinding(pf, {
+            id: 'js-toctou-fs',
+            title: 'Time-of-check to time-of-use (TOCTOU) on filesystem path',
+            severity: 'medium',
+            cwe: 'CWE-367',
+            confidence: 'medium',
+            hint: 'Avoid existsSync() before read/write/unlink; perform the operation directly (or with O_EXCL / try-catch ENOENT) to avoid race conditions.',
+          }, line, lines[line - 1] || '', `Checks existsSync(${targetVar}) before a synchronous file operation on the same path.`);
+        }
+      });
+    }
+  }
+
+  // 3. Cross-file Frontend <-> Backend API contract mismatch check.
+  checksRun++;
+  for (const call of frontendCalls) {
+    const backend = backendRoutes.get(call.routePath);
+    if (!backend) continue;
+    const normMap = new Map();
+    for (const bk of backend.bodyKeys) {
+      normMap.set(bk.toLowerCase().replace(/_/g, ''), bk);
+    }
+    for (const fk of call.keys) {
+      if (backend.bodyKeys.has(fk)) continue;
+      const norm = fk.toLowerCase().replace(/_/g, '');
+      const matchingBackendKey = normMap.get(norm);
+      if (matchingBackendKey && matchingBackendKey !== fk) {
+        pushFinding(call.pf, {
+          id: 'js-api-contract-mismatch',
+          title: `API payload field "${fk}" mismatches backend "${matchingBackendKey}"`,
+          severity: 'medium',
+          cwe: 'CWE-684',
+          confidence: 'high',
+          hint: `Frontend sends "${fk}" to ${call.routePath}, but ${backend.file}:${backend.line} reads req.body.${matchingBackendKey}. Align the field names.`,
+        }, call.line, call.excerpt, `Frontend sends "${fk}" while backend route ${backend.file}:${backend.line} expects "${matchingBackendKey}".`);
+      }
+    }
+  }
+
+  return { findings, checksRun };
+}
+
+module.exports = { analyzeCrossFileProject };

@@ -9,7 +9,7 @@ const execFileAsync = promisify(execFile);
 const ipc = typeof ipcMain?.handle === 'function' ? ipcMain.handle.bind(ipcMain) : () => {};
 const { scanProjectRoot, toSarifReport, toMarkdownReport, kinds } = require('./scanner.cjs');
 const { shared, categoryRules } = require('./rules.cjs');
-const { verifyFinding, reviewFindings, getSourceContext, checkAiHealth, generateFindingFix, applyFindingFix, MODEL } = require('./ai-review.cjs');
+const { verifyFinding, reviewFindings, getSourceContext, checkAiHealth, generateFindingFix, generateFileBatchFixes, applyFindingFix, MODEL } = require('./ai-review.cjs');
 const { getCodexAuthStatus, getAvailableCodexModels, connectCodexBrowser, disconnectCodex } = require('./codex-auth.cjs');
 const { getSystemProfile, runExtremeTest, stopExtremeTest } = require('./extreme-tester.cjs');
 const isInside = (root, target) => { const rel = path.relative(root, target); return rel === '' || (!rel.startsWith(`..${path.sep}`) && rel !== '..' && !path.isAbsolute(rel)); };
@@ -311,7 +311,36 @@ ipc('fix-all-findings', async (_event, payload) => {
   const worker = async () => {
     while (cursor < fileGroups.length) {
       const group = fileGroups[cursor++];
+      const fileRel = group[0]?.file || '';
+      const handledIds = new Set();
+      if (group.length > 1) {
+        for (let offset = 0; offset < group.length; offset += 12) {
+          const slice = group.slice(offset, offset + 12);
+          try {
+            const patches = await generateFileBatchFixes(project.root, fileRel, slice, { provider: aiCfg.provider, model: aiCfg.model, apiKey: aiCfg.apiKey });
+            for (const patch of patches) {
+              let applied = false;
+              try {
+                await applyFindingFix(project.root, patch.file, patch.target, patch.replacement);
+                applied = true;
+              } catch {
+                applied = false;
+              }
+              if (applied) {
+                fixed++;
+                fixedIds.add(patch.findingId);
+                handledIds.add(patch.findingId);
+                done++;
+                broadcast('fix-all-progress', { projectId, total: queue.length, done, fixed, failed, currentTitle: patch.explanation || fileRel, state: 'running' });
+              }
+            }
+          } catch (batchErr) {
+            if (batchErr) handledIds.delete('');
+          }
+        }
+      }
       for (const finding of group) {
+        if (handledIds.has(finding.id)) continue;
         try {
           const patch = await generateFindingFix(project.root, finding, { provider: aiCfg.provider, model: aiCfg.model, apiKey: aiCfg.apiKey });
           await applyFindingFix(project.root, patch.file, patch.target, patch.replacement);

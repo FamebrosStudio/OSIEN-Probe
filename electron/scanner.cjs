@@ -8,6 +8,7 @@
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const { analyzeJavaScriptAst } = require('./js-analyzer.cjs');
+const { analyzeCrossFileProject } = require('./cross-file-analyzer.cjs');
 const { analyzePolyglot, languageByExtension } = require('./polyglot.cjs');
 const { shared, categoryRules, SEVERITY_WEIGHT } = require('./rules.cjs');
 
@@ -740,6 +741,7 @@ async function scanProjectRoot(root, kind, options = {}) {
   let rulesEvaluated = 0;
   let truncated = false;
   const CONCURRENCY = 16;
+  const jsFiles = [];
 
   for (let start = 0; start < candidates.length && !truncated; start += CONCURRENCY) {
     const batch = candidates.slice(start, start + CONCURRENCY);
@@ -751,6 +753,7 @@ async function scanProjectRoot(root, kind, options = {}) {
       try { raw = await fs.readFile(full, 'utf8'); } catch { return null; }
       if (raw.includes('\u0000')) return null;
       const lang = langByExt[extName] || 'generic';
+      if (lang === 'js' && jsFiles.length < 400) jsFiles.push({ rel, raw, extName });
       return { lang, ...scanFileContent(raw, rel, extName, lang, catalog, applicableByLang) };
     }));
 
@@ -764,6 +767,14 @@ async function scanProjectRoot(root, kind, options = {}) {
         if (findings.length >= MAX_FINDINGS) { truncated = true; break; }
       }
       if (truncated) break;
+    }
+  }
+
+  if (!truncated && !options.skipCrossFile && jsFiles.length > 0) {
+    const cross = analyzeCrossFileProject(jsFiles, { makeFinding, parseSuppressions: suppressionMap, isSuppressed: suppressed });
+    for (const finding of cross.findings) {
+      findings.push(finding);
+      if (findings.length >= MAX_FINDINGS) { truncated = true; break; }
     }
   }
 
