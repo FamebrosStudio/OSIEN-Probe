@@ -128,7 +128,7 @@ ipc('scan-project', async (_event, id) => {
     for (const finding of project.latestRun.findings || []) { delete finding.aiAssessment; delete finding.aiReviewError; }
     await saveProjects(projects);
   }
-  const result = await scanProjectRoot(project.root, project.kind);
+  const result = await scanProjectRoot(project.root, project.kind, { bugsOnly: true });
   result.projectId = project.id;
   if (priorScore !== null) {
     result.scoreDelta = result.score - priorScore;

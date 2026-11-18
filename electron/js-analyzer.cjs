@@ -957,7 +957,9 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       if (FILE_SINKS.has(name) && node.arguments.some(containsInput)) {
         emit('js-path-traversal', node, 'high', 'Request-controlled data reaches a filesystem path.');
       }
+      const calleeObjSrc = node.callee?.object ? raw.slice(node.callee.object.start, node.callee.object.end) : '';
       if (['create', 'update', 'insertOne', 'updateOne', 'findByIdAndUpdate', 'findOneAndUpdate'].includes(name)
+        && !/(?:crypto|hmac|hash|cipher|createHmac|createHash|createCipher)/i.test(calleeObjSrc)
         && node.arguments.some((arg) => arg?.type === 'MemberExpression' && containsInput(arg))
         && !/\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(file || '')) {
         emit({
@@ -971,7 +973,9 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       const isRelativeRedirectTpl = (arg) => arg?.type === 'TemplateLiteral'
         && typeof arg.quasis?.[0]?.value?.raw === 'string'
         && /^\/(?!\/)/.test(arg.quasis[0].value.raw);
-      if (name === 'redirect' && (node.arguments.some(containsInput) || (node.arguments[0] && !staticText(node.arguments[0]) && !isRelativeRedirectTpl(node.arguments[0])))) {
+      const isValidatedRedirectTernary = (arg) => arg?.type === 'ConditionalExpression'
+        && /\b(?:origin\s*===|startsWith\s*\(\s*['"]\/['"]\))/.test(raw.slice(arg.test.start, arg.test.end));
+      if (name === 'redirect' && (node.arguments.some(containsInput) || (node.arguments[0] && !staticText(node.arguments[0]) && !isRelativeRedirectTpl(node.arguments[0]) && !isValidatedRedirectTernary(node.arguments[0])))) {
         const hasInput = containsInput(node.arguments[0]);
         emit({
           id: 'js-redirect-param',
@@ -1089,6 +1093,8 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
         if (!guardedVar) continue;
         const conseqSrc = raw.slice(cur.consequent.start, cur.consequent.end);
         if (/\b(?:return|throw|continue|break|process\.exit)\b/.test(conseqSrc)) continue;
+        if (new RegExp(`\\b${guardedVar}\\s*=`).test(conseqSrc)) continue;
+        if (nxt.type === 'IfStatement' && /\|\||&&/.test(raw.slice(nxt.test.start, nxt.test.end))) continue;
         let derefFound = false;
         walkSubtree(nxt, (inner) => {
           if (derefFound) return;

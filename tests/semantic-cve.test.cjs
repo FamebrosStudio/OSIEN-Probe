@@ -146,3 +146,30 @@ test('deep security detectors: timing-unsafe compare, mass assignment, unawaited
   assert.ok(ids.has('js-nextjs-api-no-auth'), 'detects Next.js mutating API route without auth');
   assert.ok(ids.has('py-route-missing-auth'), 'detects Python mutating route without auth');
 });
+
+test('Driftpost false-positive regression guard (HMAC .update, guarded cache/name, ternary math, delete obj[p], service_role)', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'deepcheck-driftpost-fp-'));
+  await fs.writeFile(path.join(dir, 'webhook.js'), [
+    'const expected = crypto.createHmac("sha256", secret).update(req.body).digest("hex");',
+    'function load(cache, name) {',
+    '  if (!cache) cache = { items: [] };',
+    '  const x = cache.items.length;',
+    '  if (!name) name = "default";',
+    '  if (!name || name.length < 3) return null;',
+    '  const v = x >= 1 ? 1 : 1 - Math.pow(1 - x, 2);',
+    '  const n = { a: 1 }; targets.forEach((p) => { delete n[p]; });',
+    '  return v + n.a;',
+    '}',
+    'function go(req, res, back) {',
+    '  res.redirect(back.origin === req.protocol + "://" + req.get("host") ? back.pathname : "/");',
+    '}',
+  ].join('\n'));
+  await fs.writeFile(path.join(dir, '001.sql'), 'grant all on public.items to service_role;\n');
+
+  const report = await scanProjectRoot(dir, 'Website', { bugsOnly: true });
+  const fp = report.findings.filter((f) => [
+    'js-mass-assignment-db', 'js-unguarded-null-deref', 'exp-logic-duplicate-ternary',
+    'exp-logic-delete-array-index', 'js-redirect-param', 'sql-grant-all',
+  ].includes(f.ruleId));
+  assert.equal(fp.length, 0, `expected 0 false positives, got: ${fp.map((f) => `${f.ruleId}:${f.line}`).join(', ')}`);
+});

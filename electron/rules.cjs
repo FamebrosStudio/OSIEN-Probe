@@ -609,7 +609,7 @@ const shared = [
     /^\s*DELETE\s+FROM\s+\w+\s*;?(?![^;]*\bWHERE\b)/i,
     'DELETE FROM sessions;', 'DELETE FROM sessions WHERE expired = 1;',
     'A DELETE without WHERE removes every row in the table.', { multi: true }),
-  sql('sql-grant-all', 'GRANT ALL', 'medium', 'CWE-732', /\bGRANT\s+ALL\b/i,
+  sql('sql-grant-all', 'GRANT ALL', 'medium', 'CWE-732', /\bGRANT\s+ALL\b(?![^\n;]*\bTO\s+(?:service_role|postgres|supabase_admin)\b)/i,
     'GRANT ALL ON users TO app;', 'GRANT SELECT, INSERT ON users TO app;',
     'Grant the minimum privileges the job needs.'),
 
