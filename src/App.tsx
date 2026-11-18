@@ -4,7 +4,7 @@ import './App.css'
 import './Working.css'
 import './UIOverrides.css'
 
-type Kind = 'Website' | 'Software' | 'API / backend' | 'Mobile app' | 'Library' | 'Data / ML'
+type Kind = 'Website' | 'Software' | 'API / backend' | 'Mobile app' | 'Library' | 'Data / ML' | 'Cloud / DevOps' | 'Blockchain / Web3' | 'Desktop / Electron' | 'CLI / Automation'
 type AiAssessment = { verdict: 'likely_real' | 'likely_false_positive' | 'uncertain'; confidence: number; rationale: string; evidence: string; reviewAdvice: string; model: string; reviewedAt: string }
 type Finding = { id: string; title: string; severity: string; file: string; line: number; excerpt: string; ruleId?: string; cwe?: string; hint?: string; confidence?: string; reason?: string; isNew?: boolean; fixed?: boolean; aiAssessment?: AiAssessment; aiReviewError?: string }
 type AiConfig = { provider: 'local' | 'cloud-codex'; model: string; codexConnected?: boolean; hasApiKey: boolean; apiKeyMasked: string; localModels: string[]; localAvailable?: boolean; codexModels: string[] }
@@ -89,6 +89,10 @@ const kinds: { name: Kind; detail: string; Icon: typeof Globe2 }[] = [
   { name: 'Mobile app', detail: 'Mobile source and configuration', Icon: Layers3 },
   { name: 'Library', detail: 'Public API and package configuration', Icon: FileCode2 },
   { name: 'Data / ML', detail: 'Pipelines, data, and model code', Icon: Activity },
+  { name: 'Cloud / DevOps', detail: 'Docker, Kubernetes, Terraform, CI/CD', Icon: Shield },
+  { name: 'Blockchain / Web3', detail: 'Smart contracts, Solidity, wallets', Icon: ShieldCheck },
+  { name: 'Desktop / Electron', detail: 'BrowserWindow isolation, IPC, preload', Icon: Code2 },
+  { name: 'CLI / Automation', detail: 'Shell safety, argv, temp files', Icon: Terminal },
 ]
 const icons: Record<Kind, typeof Globe2> = Object.fromEntries(kinds.map(({ name, Icon }) => [name, Icon])) as Record<Kind, typeof Globe2>
 const nav: { name: Route; Icon: typeof Layers3 }[] = [

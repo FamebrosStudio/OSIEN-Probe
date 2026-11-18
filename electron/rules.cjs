@@ -2513,4 +2513,12 @@ const categoryRules = {
   ],
 };
 
+const { extraShared, extraCategoryRules } = require('./rules-expanded.cjs');
+
+shared.push(...extraShared);
+for (const [kind, list] of Object.entries(extraCategoryRules)) {
+  if (!categoryRules[kind]) categoryRules[kind] = [];
+  categoryRules[kind].push(...list);
+}
+
 module.exports = { shared, categoryRules, SEVERITIES, SEVERITY_WEIGHT };

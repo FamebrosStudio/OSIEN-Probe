@@ -12,7 +12,7 @@ const { analyzeCrossFileProject } = require('./cross-file-analyzer.cjs');
 const { analyzePolyglot, languageByExtension } = require('./polyglot.cjs');
 const { shared, categoryRules, SEVERITY_WEIGHT } = require('./rules.cjs');
 
-const kinds = ['Website', 'Software', 'API / backend', 'Mobile app', 'Library', 'Data / ML'];
+const kinds = ['Website', 'Software', 'API / backend', 'Mobile app', 'Library', 'Data / ML', 'Cloud / DevOps', 'Blockchain / Web3', 'Desktop / Electron', 'CLI / Automation'];
 
 const MAX_FINDINGS = 1000;
 const MAX_FILES = 6000;
@@ -529,7 +529,7 @@ async function discoverTestPlan(root) {
   const packageRaw = await fs.readFile(path.join(root, 'package.json'), 'utf8').catch(() => '');
   let packageData = null;
   if (packageRaw) {
-    try { packageData = JSON.parse(packageRaw); } catch (error) { packageData = error ? null : null; }
+    try { packageData = JSON.parse(packageRaw); } catch { packageData = null; }
   }
   const script = String(packageData?.scripts?.test || '');
   const nodeRunner = /\bnode(?:\.exe)?\s+.*--test\b/i.test(script) ? 'node' : null;
