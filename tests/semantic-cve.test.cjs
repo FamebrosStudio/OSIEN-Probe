@@ -89,3 +89,26 @@ test('monorepo lockfile CVE audit and Python/Go cross-file taint detection', asy
   assert.ok(ids.has('py-crossfile-taint'), 'detects Python cross-file taint');
   assert.ok(ids.has('go-crossfile-taint'), 'detects Go cross-file taint');
 });
+
+test('real-world false-positive regression guard (JSX attrs, JSON-LD, model.eval, platform.system, .env.local.example)', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'deepcheck-fp-guard-'));
+  await fs.writeFile(path.join(dir, '.env.local.example'), 'NEXT_PUBLIC_SUPABASE_ANON_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.demo"\n');
+  await fs.writeFile(path.join(dir, 'JsonLd.tsx'), [
+    'export function JsonLd({ data }: { data: unknown }) {',
+    '  return <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: JSON.stringify(data) }} />;',
+    '}',
+    'export function InputField({ val }: { val: string }) {',
+    '  return <input type="text" value={val} onChange={() => {}} />;',
+    '}',
+  ].join('\n'));
+  await fs.writeFile(path.join(dir, 'ml_check.py'), [
+    'import hashlib, platform',
+    'GRANT_TYPE_REFRESH_TOKEN = "refresh_token"',
+    'sys_name = platform.system().lower()',
+    'model.eval()',
+    'digest = hashlib.sha256(b"blob %d\\0" % len(b"abc")).hexdigest()',
+  ].join('\n'));
+
+  const report = await scanProjectRoot(dir, 'Website', { bugsOnly: true });
+  assert.equal(report.findings.length, 0, `expected 0 false positives, got: ${report.findings.map((f) => `${f.ruleId}:${f.line}`).join(', ')}`);
+});

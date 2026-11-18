@@ -213,7 +213,7 @@ const extraShared = [
       'with (ctx) { x = 1; }', 'const { x } = ctx;', 'with() breaks lexical scoping and is forbidden in strict mode.'],
     ['arguments-callee', 'Deprecated arguments.callee blocks optimization', 'low', 'CWE-710', /\barguments\.callee\b/,
       'return arguments.callee(n - 1);', 'return factorial(n - 1);', 'Use a named function expression instead of arguments.callee.'],
-    ['void-zero-confusion', 'Chained assignment of variables without declaration', 'medium', 'CWE-457', /^\s*[a-zA-Z_$]\w*\s*=\s*[a-zA-Z_$]\w*\s*=\s*[^=]/,
+    ['void-zero-confusion', 'Chained assignment of variables without declaration', 'medium', 'CWE-457', /^\s*[a-zA-Z_$]\w*\s*=\s*[a-zA-Z_$]\w*\s*=\s*[^={\n]+;/,
       'a = b = 1;', 'const a = 1; const b = 1;', 'Declare variables explicitly to avoid accidental global leaks.'],
     ['promise-constructor-anti', 'new Promise() wraps an already async callback', 'medium', 'CWE-705', /\bnew\s+Promise\s*\(\s*async\b/,
       'new Promise(async (resolve) => { resolve(await fn()); });', 'await fn();', 'Async Promise executors hide thrown rejections; await directly instead.'],
