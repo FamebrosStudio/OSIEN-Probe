@@ -285,7 +285,7 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
   });
   for (const name of unsafeHtmlVars) safeHtmlVars.delete(name);
 
-  const visit = (node, parent, parentKey) => {
+  const visit = (node, parent, parentKey, inReexport = false) => {
     if (!node || typeof node !== 'object') return;
     const line = node.loc?.start.line;
 
@@ -693,7 +693,10 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       const seenImports = new Set();
       for (const stmt of node.body) {
         if (stmt.type === 'ImportDeclaration' && stmt.source?.value) {
-          if (seenImports.has(stmt.source.value)) {
+          const allTypeSpecs = Array.isArray(stmt.specifiers) && stmt.specifiers.length > 0 && stmt.specifiers.every((sp) => sp.importKind === 'type');
+          const importKind = (stmt.importKind === 'type' || allTypeSpecs) ? 'type' : 'value';
+          const importKey = `${importKind}:${stmt.source.value}`;
+          if (seenImports.has(importKey)) {
             emit({
               id: 'js-duplicate-import',
               title: `Duplicate import "${stmt.source.value}"`,
@@ -702,7 +705,7 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
               hint: 'Merge duplicate imports from the same module into a single import statement.',
             }, stmt, 'high', `Module "${stmt.source.value}" is imported more than once.`);
           }
-          seenImports.add(stmt.source.value);
+          seenImports.add(importKey);
         }
       }
     }
@@ -976,9 +979,9 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
           }, node, 'high', `Sensitive identifier "${identifierName(leaked)}" is passed to console.${name}().`);
         }
       }
-      if (node.type === 'CallExpression' && parent?.type === 'ExpressionStatement' && node.callee?.property?.name === 'then' && (node.callee?.type === 'MemberExpression' || node.callee?.type === 'OptionalMemberExpression') && node.arguments.length < 2) {
-        const after = raw.slice(node.end || 0, (node.end || 0) + 24).trimStart();
-        if (!new RegExp('^\\.\\s*(?:catch|finally)\\b').test(after)) {
+      if (node.type === 'CallExpression' && parent?.type === 'ExpressionStatement' && node.callee?.property?.name === 'then' && (node.callee?.type === 'MemberExpression' || node.callee?.type === 'OptionalMemberExpression') && node.arguments.length < 2 && !/\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(file || '')) {
+        const after = raw.slice(node.end || 0, (node.end || 0) + 120);
+        if (!/^\s*\.\s*(?:catch|finally)\b/.test(after)) {
           emit('js-promise-no-catch', node, 'medium', 'Promise chain has no rejection handler; attach .catch or provide an onRejected callback.');
         }
       }
@@ -1132,9 +1135,12 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       }
     }
 
-    // Undeclared identifier check (skip type nodes, property keys, declarations, and typeof).
+    // Undeclared identifier check (skip .d.ts, re-exports, type nodes, property keys, declarations, and typeof).
+    const isDtsFile = /\.d\.[cm]?ts$/i.test(file || '');
     if (
-      node.type === 'Identifier'
+      !isDtsFile
+      && !inReexport
+      && node.type === 'Identifier'
       && topScope.size > 0
       && parent
       && !(parent.type === 'MemberExpression' && parentKey === 'property' && !parent.computed)
@@ -1145,7 +1151,7 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       && !(parent.type === 'ClassProperty' && parentKey === 'key' && !parent.computed)
       && !(parent.type === 'PropertyDefinition' && parentKey === 'key' && !parent.computed)
       && !(parent.type === 'MethodDefinition' && parentKey === 'key' && !parent.computed)
-      && !(parent.type === 'ExportSpecifier' && parentKey === 'exported')
+      && !(parent.type === 'ExportSpecifier' && (parentKey === 'exported' || parent.exportKind === 'type'))
       && !(parent.type === 'LabeledStatement' && parentKey === 'label')
       && !(parent.type === 'BreakStatement' && parentKey === 'label')
       && !(parent.type === 'ContinueStatement' && parentKey === 'label')
@@ -1168,10 +1174,11 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       }, node, 'low', `Identifier "${node.name}" is not declared in this file or standard globals.`);
     }
 
+    const nextInReexport = inReexport || (node.type === 'ExportNamedDeclaration' && (Boolean(node.source) || node.exportKind === 'type')) || node.type === 'ExportAllDeclaration';
     for (const [key, value] of Object.entries(node)) {
       if (key === 'loc' || key === 'start' || key === 'end' || key === 'extra' || key === 'errors' || key === 'comments' || key === 'tokens') continue;
-      if (Array.isArray(value)) value.forEach((item) => visit(item, node, key));
-      else if (value && typeof value === 'object' && typeof value.type === 'string') visit(value, node, key);
+      if (Array.isArray(value)) value.forEach((item) => visit(item, node, key, nextInReexport));
+      else if (value && typeof value === 'object' && typeof value.type === 'string') visit(value, node, key, nextInReexport);
     }
 
     if (isFn) { fnStack.pop(); scopeStack.pop(); }

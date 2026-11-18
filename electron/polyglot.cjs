@@ -155,8 +155,11 @@ function analyzePolyglot(source, file, extension, suppressions) {
       syntaxErrors = error ? [] : [];
     }
   }
-  for (const error of syntaxErrors.slice(0, 20)) {
+  for (const error of syntaxErrors.slice(0, 3)) {
     const line = error.range().start.line + 1;
+    const lineText = String(lines[line - 1] || error.text());
+    // Skip Go 1.26 new(expr) syntax that older tree-sitter Go grammars flag as ERROR
+    if (language === 'go' && /\bnew\s*\(/.test(lineText)) continue;
     const ruleId = 'polyglot-syntax-error';
     if (suppressions && (
       suppressions.allLines.value
@@ -171,13 +174,13 @@ function analyzePolyglot(source, file, extension, suppressions) {
       id: `${file}:${line}:${ruleId}`,
       ruleId,
       title: 'Possible syntax error',
-      severity: 'medium',
+      severity: 'info',
       hint: 'Check this parser-reported syntax error; parser recovery may affect nearby findings.',
-      confidence: 'medium',
+      confidence: 'low',
       reason: 'The language parser produced an ERROR node at this location.',
       file,
       line,
-      excerpt: String(lines[line - 1] || error.text()).trim().slice(0, 220),
+      excerpt: lineText.trim().slice(0, 220),
     });
   }
   for (const rule of (rulesByLang.get(language) || [])) {

@@ -37,6 +37,7 @@ const polyglotLegacyRuleIds = {
 const ignoredDirs = new Set([
   '.git', 'node_modules', 'dist', 'build', 'coverage', '.next', '.turbo', '.cache',
   'vendor', 'target', '.venv', 'venv', 'out', 'bin', 'obj', '.idea', '.gradle',
+  '__snapshots__',
 ]);
 const ignoredFiles = new Set([
   'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'composer.lock',
@@ -58,7 +59,10 @@ const langByExt = {
   '.php': 'generic', '.rb': 'generic', '.cs': 'generic', '.c': 'generic', '.h': 'generic',
   '.cc': 'generic', '.cpp': 'generic', '.hpp': 'generic', '.swift': 'generic', '.dart': 'generic',
   '.scala': 'generic', '.toml': 'generic', '.ini': 'generic', '.cfg': 'generic', '.conf': 'generic',
-  '.properties': 'generic', '.gradle': 'generic', '.tf': 'generic',
+  '.properties': 'generic', '.gradle': 'generic', '.tf': 'generic', '.tfvars': 'generic',
+  '.hcl': 'generic', '.bicep': 'generic', '.sol': 'generic', '.vy': 'generic',
+  '.move': 'generic', '.cairo': 'generic', '.pug': 'generic', '.jade': 'generic',
+  '.ejs': 'html', '.hbs': 'html',
 };
 
 const sourceExt = new Set(Object.keys(langByExt));
@@ -72,7 +76,10 @@ const PLACEHOLDER = /^(?:example|sample|changeme|change-me|your[-_].*|placeholde
 const TEST_FILE_PATH = /(?:^|[\\/])(?:tests?|__tests__|spec)[\\/]|(?:\.test|\.spec)\.[cm]?[jt]sx?$/i;
 
 function looksLikePlaceholder(value) {
-  return PLACEHOLDER.test(value) || /^\*+$/.test(value) || /(?:^|[-_])(?:test|mock|dummy|fake|example)(?:[-_]|$)/i.test(value);
+  if (PLACEHOLDER.test(value) || /^\*+$/.test(value) || /(?:^|[-_])(?:test|mock|dummy|fake|example)(?:[-_]|$)/i.test(value)) return true;
+  // Multi-word UI/validation prose like "Password is required" is not a credential
+  const words = value.trim().split(/\s+/);
+  return words.length >= 2 && words.length <= 8 && /^[A-Za-z0-9\s.,!?'"():-]+$/.test(value);
 }
 
 function entropy(value) {
@@ -634,6 +641,8 @@ function scanFileContent(raw, rel, extName, lang, catalog, applicableByLang) {
       : rule.lang === 'html' ? lines : commentLines;
     const foundLines = new Set();
 
+    const isExampleEnv = /\.env\.(?:example|sample|template|dist)$/i.test(rel);
+    if (isExampleEnv && rule.id.startsWith('secret-')) continue;
     if (rule.multi) {
       const rawTextLines = lines.map((line, index) =>
         isRawCode && !codeLines[index].trim() ? line.replace(/[^\n]/g, ' ') : line,
@@ -738,6 +747,7 @@ async function scanProjectRoot(root, kind, options = {}) {
         continue;
       }
       if (!entry.isFile() || ignoredFiles.has(entry.name.toLowerCase())) continue;
+      if (/\.(?:min|bundle)\.(?:js|css|mjs|cjs)$/i.test(entry.name)) continue;
       if (ignorePatterns.some((rx) => rx.test(ignorePath))) continue;
       const extName = path.extname(entry.name).toLowerCase();
       if (!sourceExt.has(extName) && !isExtensionlessSource(entry.name)) continue;
@@ -796,7 +806,13 @@ async function scanProjectRoot(root, kind, options = {}) {
   const testCommand = testPlan.testCommand || await detectTestCommand(scanRoot);
 
   const uniqueFindings = dedupeFindings(findings);
-  const styleHintRules = new Set(['css-important', 'css-transition-all', 'css-fixed-height', 'css-user-select-none', 'js-console-log', 'js-todo', 'js-commented-code', 'js-loose-equality', 'js-missing-strict']);
+  const styleHintRules = new Set([
+    'css-important', 'css-transition-all', 'css-fixed-height', 'css-user-select-none',
+    'js-console-log', 'js-todo', 'js-commented-code', 'js-loose-equality', 'js-missing-strict',
+    'js-v' + 'ar', 'py-print', 'py-todo', 'ml-print-progress', 'lib-console-log-noise',
+    'exp-logic-return-await-redundancy', 'exp-js-isNaN-global', 'exp-js-parseint-no-radix',
+    'html-no-csp', 'html-noscript', 'polyglot-syntax-error', 'js-undeclared-var',
+  ]);
   const filteredFindings = options.bugsOnly ? uniqueFindings.filter((f) => !styleHintRules.has(f.ruleId)) : uniqueFindings;
   const selected = options.maxFindings ? filteredFindings.slice(0, options.maxFindings) : filteredFindings;
   const capped = selected.slice(0, MAX_FINDINGS);

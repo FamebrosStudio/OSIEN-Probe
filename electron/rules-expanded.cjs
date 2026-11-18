@@ -123,8 +123,8 @@ const extraShared = [
       'return new Handlebars.SafeString(userHtml);', 'return Handlebars.escapeExpression(userHtml);', 'Only wrap sanitized HTML in Handlebars.SafeString.'],
     ['ejs-unescaped-output', 'Unescaped EJS <%- output tag (XSS risk)', 'medium', 'CWE-79', /<%-\s*[^%]+%>/,
       '<div><%- userBio %></div>', '<div><%= userBio %></div>', 'Use <%= for HTML-escaped output unless content is sanitized.'],
-    ['pug-unescaped-output', 'Unescaped Pug != interpolation (XSS risk)', 'medium', 'CWE-79', /!=\s*[a-zA-Z_$]/,
-      'p!= userBio', 'p= userBio', 'Use = instead of != in Pug templates to auto-escape HTML.'],
+    ['pug-unescaped-output', 'Unescaped Pug !{} interpolation (XSS risk)', 'medium', 'CWE-79', /!\{\s*[a-zA-Z_$][\w$.]*\s*\}/,
+      'p Welcome !{userBio}', 'p Welcome #{userBio}', 'Use escaped #{} interpolation in Pug templates instead of !{}.'],
     ['dom-location-assign-input', 'location.assign() called with request/URL input', 'high', 'CWE-601', /\blocation\.assign\s*\([^)]*(?:location\.|searchParams|req\.|params|query)/,
       'location.assign(searchParams.get("next"));', 'location.assign("/dashboard");', 'Validate redirect destinations to same-origin paths only.'],
     ['dom-location-replace-input', 'location.replace() called with request/URL input', 'high', 'CWE-601', /\blocation\.replace\s*\([^)]*(?:location\.|searchParams|req\.|params|query)/,
@@ -868,7 +868,7 @@ function buildParameterizedSharedRules() {
       'if (ok) run(); else {}', 'if (ok) run();', 'Remove empty else blocks.'],
     ['duplicate-ternary', 'Ternary returns identical value in both branches', 'medium', 'CWE-670', /\?\s*([a-zA-Z0-9_.'"]+)\s*:\s*\1(?![a-zA-Z0-9_.?])/,
       'const x = ok ? 10 : 10;', 'const x = ok ? 10 : 20;', 'Both branches of the ternary evaluate to the same expression.'],
-    ['self-assignment', 'Variable assigned to itself (x = x)', 'medium', 'CWE-480', /^\s*(?:this\.)?([a-zA-Z_$][\w$]*)\s*=\s*(?:this\.)?\1\s*;/,
+    ['self-assignment', 'Variable assigned to itself (x = x)', 'medium', 'CWE-480', /^\s*(this\.[a-zA-Z_$][\w$]*|[a-zA-Z_$][\w$]*)\s*=\s*\1\s*;/,
       'count = count;', 'count = nextCount;', 'Self-assignment has no effect and usually indicates a typo.'],
     ['self-comparison', 'Variable compared to itself (x === x)', 'medium', 'CWE-480', /(?<![.\w$])([a-zA-Z_$][\w$]*)\s*(?:===|!==|==|!=)\s*\1(?![.\w$])/,
       'if (userId === userId) allow();', 'if (userId === ownerId) allow();', 'Comparing a variable to itself is always constant.'],
@@ -1064,7 +1064,7 @@ const extraCategoryRules = {
   ],
 
   'Blockchain / Web3': [
-    ...compilePack(js, 'web3', [
+    ...compilePack(any, 'web3', [
       ['tx-origin-auth', 'Solidity/Web3 tx.origin used for authorization (phishing risk)', 'critical', 'CWE-287', /\btx\.origin\b/,
         'require(tx.origin == owner);', 'require(msg.sender == owner);', 'Use msg.sender instead of tx.origin for authorization checks.'],
       ['selfdestruct-call', 'Deprecated selfdestruct() / suicide() contract destruction', 'high', 'CWE-284', /\b(?:selfdestruct|suicide)\s*\(/,
