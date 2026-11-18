@@ -271,7 +271,7 @@ const shared = [
     'Grant only the minimum file permissions required.'),
 
   // -------------------------------------------------------------------- Python
-  py('py-eval', 'Dynamic code evaluation', 'high', 'CWE-95', /\beval\s*\(/,
+  py('py-eval', 'Dynamic code evaluation', 'high', 'CWE-95', /(?:^|[^.\w])eval\s*\((?!\s*\))/,
     'eval(user_input)', 'ast.literal_eval(user_input)',
     'Prefer ast.literal_eval for data literals.'),
   py('py-exec', 'Exec of dynamic code', 'high', 'CWE-95', /(?:^|[^.\w])exec\s*\(/,
@@ -2416,7 +2416,7 @@ const categoryRules = {
       'tools = [ReadOnlySearchTool()]',
       'Never expose an unrestricted ShellTool to untrusted LLM prompts.'),
     py('ml-eval-metric-expr', 'eval() used on dynamic ML config or formula', 'critical', 'CWE-95',
-      /\beval\s*\(\s*(?!['"][^'"]+['"]\s*\))[a-zA-Z_][\w.]*/,
+      /(?:^|[^.\w])eval\s*\(\s*(?!['"][^'"]+['"]\s*\))[a-zA-Z_][\w.]*/,
       'score = eval(metric_expr)',
       'score = METRIC_REGISTRY[metric_name](y_true, y_pred)',
       'Never pass formula strings to eval(); use a registry dict or ast.literal_eval.'),

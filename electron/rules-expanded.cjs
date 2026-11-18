@@ -297,7 +297,7 @@ const extraShared = [
       'p = os.tmpnam()', 'with tempfile.NamedTemporaryFile() as f: pass', 'Use tempfile.NamedTemporaryFile() instead of os.tmpnam().'],
     ['fastapi-cors-star', 'FastAPI CORSMiddleware allow_origins=["*"] with credentials', 'high', 'CWE-942', /allow_origins\s*=\s*\[\s*['"]\*['"]\s*\]/,
       'app.add_middleware(CORSMiddleware, allow_origins=["*"])', 'app.add_middleware(CORSMiddleware, allow_origins=["https://app.example.com"])', 'Specify explicit allowed origins in CORSMiddleware.'],
-    ['pydantic-eval-validator', 'eval() inside data pipeline or validator', 'critical', 'CWE-95', /\beval\s*\(/,
+    ['pydantic-eval-validator', 'eval() inside data pipeline or validator', 'critical', 'CWE-95', /(?:^|[^.\w])eval\s*\((?!\s*\))/,
       'val = eval(expr)', 'val = ast.literal_eval(expr)', 'Use ast.literal_eval() or json.loads() instead of eval().'],
     ['pandas-eval-user', 'pandas.eval() / df.query() with untrusted input', 'high', 'CWE-94', /\b(?:pd\.eval|df\.query)\s*\(\s*f['"]/,
       'df.query(f"col == {user_val}")', 'df[df["col"] == user_val]', 'Avoid f-string interpolation inside df.query() or pd.eval().'],
@@ -808,7 +808,7 @@ function buildParameterizedSharedRules() {
       'open(f"/data/{user_file}")', 'open(safe_join("/data", user_file))', 'Validate and confine paths before opening files.'],
     ['pickle-load-file', 'pickle.load() deserializes untrusted file', 'critical', 'CWE-502', /\bpickle\.load\s*\(/,
       'pickle.load(uploaded)', 'json.load(uploaded)', 'Use JSON or safetensors instead of pickle.'],
-    ['eval-input', 'eval() called on dynamic expression', 'critical', 'CWE-95', /\beval\s*\(/,
+    ['eval-input', 'eval() called on dynamic expression', 'critical', 'CWE-95', /(?:^|[^.\w])eval\s*\((?!\s*\))/,
       'eval(expr)', 'ast.literal_eval(expr)', 'Use ast.literal_eval() instead of eval().'],
   ];
   for (const fw of pyFrameworks) {
