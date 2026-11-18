@@ -91,9 +91,11 @@ function makeDepFinding(adv, rel, line, excerpt, declaredVersion) {
 
 async function readOptionalFile(filePath) {
   try {
-    return await fs.readFile(filePath, 'utf8');
+    const content = await fs.readFile(filePath, 'utf8');
+    return content;
   } catch (err) {
-    return err ? null : null;
+    if (err?.code === 'ENOENT') return null;
+    return null;
   }
 }
 
@@ -103,8 +105,13 @@ async function auditDependencies(scanRoot) {
   // 1. package.json
   const pkgRaw = await readOptionalFile(path.join(scanRoot, 'package.json'));
   if (pkgRaw) {
+    let pkg = null;
     try {
-      const pkg = JSON.parse(pkgRaw);
+      pkg = JSON.parse(pkgRaw);
+    } catch (err) {
+      if (err) pkg = null;
+    }
+    if (pkg && typeof pkg === 'object') {
       const sections = [pkg.dependencies, pkg.devDependencies, pkg.optionalDependencies];
       for (const deps of sections) {
         if (!deps || typeof deps !== 'object') continue;
@@ -116,8 +123,6 @@ async function auditDependencies(scanRoot) {
           }
         }
       }
-    } catch (err) {
-      if (err) { /* ignore malformed package.json */ }
     }
   }
 

@@ -1,0 +1,71 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+
+const { scanProjectRoot } = require('../electron/scanner.cjs');
+
+test('dependency auditor detects vulnerable npm, Python, and Go packages and ignores patched versions', async () => {
+  const vulnDir = await fs.mkdtemp(path.join(os.tmpdir(), 'deepcheck-dep-vuln-'));
+  await fs.writeFile(path.join(vulnDir, 'package.json'), JSON.stringify({
+    name: 'vuln-app',
+    dependencies: { lodash: '^4.17.19', express: '^4.19.2' },
+  }, null, 2));
+  await fs.writeFile(path.join(vulnDir, 'requirements.txt'), 'pyyaml==5.3.1\nrequests==2.32.0\n');
+  await fs.writeFile(path.join(vulnDir, 'go.mod'), 'module example.com/app\nrequire github.com/dgrijalva/jwt-go v3.2.0\n');
+
+  const report = await scanProjectRoot(vulnDir, 'API / backend');
+  const ids = new Set(report.findings.map((f) => f.ruleId));
+  assert.ok(ids.has('dep-npm-lodash-cve'), 'flags lodash < 4.17.21');
+  assert.ok(!ids.has('dep-npm-express-cve'), 'does not flag patched express >= 4.19.2');
+  assert.ok(ids.has('dep-py-pyyaml-cve'), 'flags PyYAML < 5.4');
+  assert.ok(!ids.has('dep-py-requests-cve'), 'does not flag patched requests >= 2.31.0');
+  assert.ok(ids.has('dep-go-jwt-go-deprecated'), 'flags deprecated jwt-go');
+});
+
+test('semantic polyglot detects Solidity CEI reentrancy, unprotected init, and Python/Go taint', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'deepcheck-sem-'));
+  await fs.writeFile(path.join(dir, 'Vault.sol'), [
+    'pragma solidity ^0.8.20;',
+    'contract Vault {',
+    '  mapping(address => uint256) public balances;',
+    '  function initialize(address _owner) external { owner = _owner; }',
+    '  function withdraw(uint256 amount) external {',
+    '    (bool ok, ) = msg.sender.call{value: amount}("");',
+    '    require(ok);',
+    '    balances[msg.sender] -= amount;',
+    '  }',
+    '  function safeWithdraw(uint256 amount) external nonReentrant {',
+    '    balances[msg.sender] -= amount;',
+    '    (bool ok, ) = msg.sender.call{value: amount}("");',
+    '    require(ok);',
+    '  }',
+    '}',
+  ].join('\n'));
+
+  await fs.writeFile(path.join(dir, 'app.py'), [
+    'def handler(request, cursor):',
+    '    uid = request.args.get("id")',
+    '    cursor.execute("SELECT * FROM users WHERE id = " + uid)',
+  ].join('\n'));
+
+  await fs.writeFile(path.join(dir, 'main.go'), [
+    'package main',
+    'func handler(r *http.Request, db *sql.DB) {',
+    '    q := r.URL.Query().Get("name")',
+    '    db.Query("SELECT * FROM users WHERE name = " + q)',
+    '}',
+  ].join('\n'));
+
+  const report = await scanProjectRoot(dir, 'Blockchain / Web3');
+  const ids = new Set(report.findings.map((f) => f.ruleId));
+  assert.ok(ids.has('sol-reentrancy-cei'), 'detects Solidity CEI reentrancy');
+  assert.ok(ids.has('sol-unprotected-sensitive-fn'), 'detects unprotected initialize()');
+  assert.ok(ids.has('py-taint-sink'), 'detects Python request->SQL taint');
+  assert.ok(ids.has('go-taint-sink'), 'detects Go request->SQL taint');
+  const safeWithdrawFlags = report.findings.filter((f) => f.ruleId === 'sol-reentrancy-cei' && f.line >= 10);
+  assert.equal(safeWithdrawFlags.length, 0, 'does not flag nonReentrant safeWithdraw');
+});
