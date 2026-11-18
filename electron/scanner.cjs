@@ -783,7 +783,7 @@ async function scanProjectRoot(root, kind, options = {}) {
   }
 
   if (!truncated && !options.skipCrossFile && jsFiles.length > 0) {
-    const cross = analyzeCrossFileProject(jsFiles, { makeFinding, parseSuppressions: suppressionMap, isSuppressed: suppressed });
+    const cross = await analyzeCrossFileProject(jsFiles, { makeFinding, parseSuppressions: suppressionMap, isSuppressed: suppressed }, scanRoot);
     for (const finding of cross.findings) {
       findings.push(finding);
       if (findings.length >= MAX_FINDINGS) { truncated = true; break; }
@@ -796,7 +796,9 @@ async function scanProjectRoot(root, kind, options = {}) {
   const testCommand = testPlan.testCommand || await detectTestCommand(scanRoot);
 
   const uniqueFindings = dedupeFindings(findings);
-  const selected = options.maxFindings ? uniqueFindings.slice(0, options.maxFindings) : uniqueFindings;
+  const styleHintRules = new Set(['css-important', 'css-transition-all', 'css-fixed-height', 'css-user-select-none', 'js-console-log', 'js-todo', 'js-commented-code', 'js-loose-equality', 'js-missing-strict']);
+  const filteredFindings = options.bugsOnly ? uniqueFindings.filter((f) => !styleHintRules.has(f.ruleId)) : uniqueFindings;
+  const selected = options.maxFindings ? filteredFindings.slice(0, options.maxFindings) : filteredFindings;
   const capped = selected.slice(0, MAX_FINDINGS);
   const severityCounts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
   for (const finding of capped) {

@@ -1,6 +1,7 @@
 'use strict';
 
 const path = require('node:path');
+const fs = require('node:fs/promises');
 const { parse } = require('@babel/parser');
 
 const REQUEST_TAINT_RE = /(?:req\.(?:body|query|params|headers|cookies)|request\.(?:body|query|params|headers|cookies)|searchParams\.|URLSearchParams|location\.(?:search|hash)|event\.target\.value|e\.target\.value)/i;
@@ -57,11 +58,43 @@ function memberPath(node) {
   return '';
 }
 
-function resolveImportPath(fromRel, spec) {
-  if (!spec || (!spec.startsWith('./') && !spec.startsWith('../'))) return '';
-  const dir = path.posix.dirname(fromRel.replace(/\\/g, '/'));
-  const joined = path.posix.normalize(path.posix.join(dir, spec));
-  return joined.replace(/\.(?:js|jsx|ts|tsx|mjs|cjs)$/, '');
+async function loadAliasPrefixes(scanRoot) {
+  const aliases = [
+    { prefix: '@/', target: 'src/' },
+    { prefix: '~/', target: '' },
+  ];
+  if (!scanRoot) return aliases;
+  try {
+    const raw = await fs.readFile(path.join(scanRoot, 'tsconfig.json'), 'utf8');
+    const cleaned = raw.replace(/\/\*[\s\S]*?\*\/|^\s*\/\/.*$/gm, '');
+    const parsed = JSON.parse(cleaned);
+    const pathsCfg = parsed?.compilerOptions?.paths || {};
+    for (const [key, vals] of Object.entries(pathsCfg)) {
+      if (!Array.isArray(vals) || !vals[0]) continue;
+      const prefix = key.replace(/\*$/, '');
+      const target = String(vals[0]).replace(/^\.\//, '').replace(/\*$/, '');
+      if (prefix) aliases.unshift({ prefix, target });
+    }
+  } catch {
+    // tsconfig.json is optional; default @/ and ~/ aliases still apply.
+  }
+  return aliases;
+}
+
+function resolveImportPath(fromRel, spec, aliasPrefixes = []) {
+  if (!spec) return '';
+  if (spec.startsWith('./') || spec.startsWith('../')) {
+    const dir = path.posix.dirname(fromRel.replace(/\\/g, '/'));
+    const joined = path.posix.normalize(path.posix.join(dir, spec));
+    return joined.replace(/\.(?:js|jsx|ts|tsx|mjs|cjs)$/, '');
+  }
+  for (const { prefix, target } of aliasPrefixes) {
+    if (spec.startsWith(prefix)) {
+      const rest = spec.slice(prefix.length);
+      return path.posix.normalize(`${target}${rest}`).replace(/\.(?:js|jsx|ts|tsx|mjs|cjs)$/, '');
+    }
+  }
+  return '';
 }
 
 function stripExt(rel) {
@@ -81,7 +114,8 @@ function paramNamesOf(fnNode) {
 function inspectFunctionBody(fnNode, raw) {
   const params = paramNamesOf(fnNode);
   const paramSinkHits = [];
-  if (!fnNode?.body) return { isAsync: Boolean(fnNode?.async), paramSinkHits };
+  const forwardCalls = [];
+  if (!fnNode?.body) return { isAsync: Boolean(fnNode?.async), paramSinkHits, forwardCalls };
 
   walk(fnNode.body, (node) => {
     if (node.type !== 'CallExpression' && node.type !== 'OptionalCallExpression') return;
@@ -92,29 +126,33 @@ function inspectFunctionBody(fnNode, raw) {
     else if (SHELL_SINKS.has(calleeName)) sinkKind = `command execution (${calleeName})`;
     else if (calleeName === 'eval') sinkKind = 'eval()';
     else if (calleeName === 'redirect') sinkKind = 'HTTP redirect';
-    if (!sinkKind) return;
 
-    for (const arg of node.arguments || []) {
+    (node.arguments || []).forEach((arg, argIdx) => {
       const argSrc = raw.slice(arg.start, arg.end);
-      if (SANITIZER_RE.test(argSrc)) continue;
+      if (SANITIZER_RE.test(argSrc)) return;
       params.forEach((pName, idx) => {
         if (!pName) return;
         const re = new RegExp(`\\b${pName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
         if (re.test(argSrc)) {
-          paramSinkHits.push({ paramIndex: idx, paramName: pName, sinkKind, line: node.loc?.start.line || 1 });
+          if (sinkKind) {
+            paramSinkHits.push({ paramIndex: idx, paramName: pName, sinkKind, line: node.loc?.start.line || 1 });
+          } else if (node.callee?.type === 'Identifier') {
+            forwardCalls.push({ calleeName: node.callee.name, argIndex: argIdx, callerParamIndex: idx, callerParamName: pName, line: node.loc?.start.line || 1 });
+          }
         }
       });
-    }
+    });
   });
 
-  return { isAsync: Boolean(fnNode?.async), paramSinkHits };
+  return { isAsync: Boolean(fnNode?.async), paramSinkHits, forwardCalls };
 }
 
-function analyzeCrossFileProject(jsFiles, helpers) {
+async function analyzeCrossFileProject(jsFiles, helpers, scanRoot = '') {
   const { makeFinding, parseSuppressions, isSuppressed } = helpers;
   const findings = [];
   let checksRun = 0;
   if (!Array.isArray(jsFiles) || jsFiles.length === 0) return { findings, checksRun };
+  const aliasPrefixes = await loadAliasPrefixes(scanRoot);
 
   // 1. Parse all JS/TS files once and index exports, routes, API calls, and module-level state.
   const parsedFiles = [];
@@ -204,18 +242,12 @@ function analyzeCrossFileProject(jsFiles, helpers) {
     findings.push(makeFinding(spec, pf.entry.rel, line, excerpt, reason));
   };
 
-  // 2. Second pass: cross-file call graph checks, route auth checks, shared async state, TOCTOU, and API contracts.
+  // Pre-compute importedSymbols for every file so we can propagate multi-hop taint before emitting findings.
   for (const pf of parsedFiles) {
-    const { entry, ast, relNorm } = pf;
-    const raw = entry.raw;
-    const lines = raw.split(/\r?\n/);
-    const isTestOrScript = /(?:^|\/)(?:test|tests|__tests__|spec|scripts)\//i.test(relNorm) || /\.(?:test|spec)\./i.test(relNorm);
-
-    // Map local imported identifier -> exported function metadata.
     const importedSymbols = new Map();
-    for (const stmt of ast.program?.body || []) {
+    for (const stmt of pf.ast.program?.body || []) {
       if (stmt.type === 'ImportDeclaration' && stmt.source?.value) {
-        const targetMod = resolveImportPath(relNorm, stmt.source.value);
+        const targetMod = resolveImportPath(pf.relNorm, stmt.source.value, aliasPrefixes);
         const modExports = exportIndex.get(targetMod) || exportIndex.get(`${targetMod}/index`);
         if (!modExports) continue;
         for (const sp of stmt.specifiers || []) {
@@ -230,7 +262,7 @@ function analyzeCrossFileProject(jsFiles, helpers) {
         for (const decl of stmt.declarations || []) {
           const init = decl.init;
           if (init?.type === 'CallExpression' && init.callee?.name === 'require' && init.arguments?.[0]?.type === 'StringLiteral') {
-            const targetMod = resolveImportPath(relNorm, init.arguments[0].value);
+            const targetMod = resolveImportPath(pf.relNorm, init.arguments[0].value, aliasPrefixes);
             const modExports = exportIndex.get(targetMod) || exportIndex.get(`${targetMod}/index`);
             if (!modExports) continue;
             if (decl.id?.type === 'ObjectPattern') {
@@ -246,6 +278,44 @@ function analyzeCrossFileProject(jsFiles, helpers) {
         }
       }
     }
+    pf.importedSymbols = importedSymbols;
+  }
+
+  // Multi-hop fixed-point taint propagation (up to 4 hops across files).
+  for (let hop = 0; hop < 4; hop++) {
+    let changed = false;
+    for (const pf of parsedFiles) {
+      const modExports = exportIndex.get(pf.modKey);
+      if (!modExports) continue;
+      for (const expMeta of modExports.values()) {
+        for (const fc of expMeta.forwardCalls || []) {
+          const targetMeta = pf.importedSymbols.get(fc.calleeName) || modExports.get(fc.calleeName);
+          if (!targetMeta?.paramSinkHits?.length) continue;
+          for (const sinkHit of targetMeta.paramSinkHits) {
+            if (sinkHit.paramIndex !== fc.argIndex) continue;
+            const already = expMeta.paramSinkHits.some((h) => h.paramIndex === fc.callerParamIndex && h.sinkKind === sinkHit.sinkKind);
+            if (!already) {
+              expMeta.paramSinkHits.push({
+                paramIndex: fc.callerParamIndex,
+                paramName: fc.callerParamName,
+                sinkKind: sinkHit.sinkKind,
+                line: sinkHit.line,
+              });
+              changed = true;
+            }
+          }
+        }
+      }
+    }
+    if (!changed) break;
+  }
+
+  // 2. Second pass: cross-file call graph checks, route auth & IDOR checks, shared async state, TOCTOU, and API contracts.
+  for (const pf of parsedFiles) {
+    const { entry, ast, relNorm, importedSymbols } = pf;
+    const raw = entry.raw;
+    const lines = raw.split(/\r?\n/);
+    const isTestOrScript = /(?:^|\/)(?:test|tests|__tests__|spec|scripts)\//i.test(relNorm) || /\.(?:test|spec)\./i.test(relNorm);
 
     // 2a. Cross-file taint & unawaited async checks.
     checksRun += 2;
@@ -320,6 +390,24 @@ function analyzeCrossFileProject(jsFiles, helpers) {
         }
         if (bodyKeys.size > 0) {
           backendRoutes.set(routeArg.value, { file: entry.rel, line, bodyKeys });
+        }
+      }
+
+      // IDOR check: authenticated delete/put/patch route mutating by req.params.* without referencing user/owner scope.
+      if (!isTestOrScript && hasAuth && ['delete', 'put', 'patch'].includes(method) && /\/:[a-zA-Z_]\w*/.test(routeArg.value) && handler) {
+        const handlerSrc = raw.slice(handler.start, handler.end);
+        const usesParamId = /\b(?:req|request|r)\.params\./.test(handlerSrc);
+        const mutatesDb = /\.(?:delete|remove|destroy|update|findByIdAndDelete|findByIdAndUpdate|deleteOne|updateOne)\s*\(/.test(handlerSrc);
+        const checksOwnership = /\b(?:req\.user|userId|user_id|ownerId|owner_id|authorId|author_id|session\.user|auth\.uid)\b/.test(handlerSrc);
+        if (usesParamId && mutatesDb && !checksOwnership) {
+          pushFinding(pf, {
+            id: 'js-idor-missing-ownership',
+            title: `Potential IDOR on ${method.toUpperCase()} ${routeArg.value}: missing ownership check`,
+            severity: 'high',
+            cwe: 'CWE-639',
+            confidence: 'medium',
+            hint: 'Scope the update/delete query by the authenticated user ID (e.g. req.user.id / user_id) so users cannot modify other accounts\' records.',
+          }, line, lines[line - 1] || '', `Route ${method.toUpperCase()} ${routeArg.value} mutates a record using req.params without scoping to user/owner identity.`);
         }
       }
     });

@@ -329,7 +329,7 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       for (const p of node.params || []) collectPatternBindings(p, fnScope);
       if (node.body?.type === 'BlockStatement') collectScopeBindings(node.body.body, fnScope);
       scopeStack.push(fnScope);
-      fnStack.push({ name: fnName, async: Boolean(node.async), params: new Set(node.params.filter((p) => p.type === 'Identifier').map((p) => p.name)) });
+      fnStack.push({ name: fnName, async: Boolean(node.async), body: node.body, params: new Set(node.params.filter((p) => p.type === 'Identifier').map((p) => p.name)) });
 
       // Detect fetch() response consumed without checking res.ok or res.status.
       if (node.async && node.body?.type === 'BlockStatement') {
@@ -1013,6 +1013,84 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
             cwe: 'CWE-390',
             hint: 'Log or handle the rejection instead of swallowing it silently.',
           }, node, 'medium', 'Promise .catch() handler has an empty block and silently discards errors.');
+        }
+      }
+      if (name === 'useEffect' && node.arguments[0] && (node.arguments[0].type === 'ArrowFunctionExpression' || node.arguments[0].type === 'FunctionExpression')) {
+        const effBody = node.arguments[0].body;
+        if (effBody?.type === 'BlockStatement') {
+          const effSrc = raw.slice(effBody.start, effBody.end);
+          const registersListener = /\b(?:addEventListener|setInterval|\.subscribe)\s*\(/.test(effSrc);
+          const hasReturnCleanup = /\breturn\s+(?:\(\s*\)\s*=>|function\b|[a-zA-Z_$][\w$]*)/.test(effSrc);
+          if (registersListener && !hasReturnCleanup) {
+            emit({
+              id: 'js-react-effect-leak',
+              title: 'useEffect registers listener/interval without cleanup',
+              severity: 'medium',
+              cwe: 'CWE-401',
+              hint: 'Return a cleanup function from useEffect (e.g. return () => clearInterval(id) / removeEventListener(...)) to prevent memory leaks.',
+            }, node, 'medium', 'useEffect sets up an event listener, interval, or subscription without returning a cleanup teardown.');
+          }
+        }
+      }
+    }
+
+    // Control-flow guard check: `if (!x) { log(); }` (no return/throw/else) followed immediately by `x.prop`.
+    if (node.type === 'BlockStatement' || node.type === 'Program') {
+      const stmts = node.body || [];
+      for (let idx = 0; idx < stmts.length - 1; idx++) {
+        const cur = stmts[idx];
+        const nxt = stmts[idx + 1];
+        if (cur?.type !== 'IfStatement' || cur.alternate) continue;
+        let guardedVar = '';
+        if (cur.test?.type === 'UnaryExpression' && cur.test.operator === '!' && cur.test.argument?.type === 'Identifier') {
+          guardedVar = cur.test.argument.name;
+        } else if (cur.test?.type === 'BinaryExpression' && ['==', '==='].includes(cur.test.operator)) {
+          if (cur.test.left?.type === 'Identifier' && (cur.test.right?.type === 'NullLiteral' || (cur.test.right?.type === 'Identifier' && cur.test.right.name === 'undefined'))) {
+            guardedVar = cur.test.left.name;
+          }
+        }
+        if (!guardedVar) continue;
+        const conseqSrc = raw.slice(cur.consequent.start, cur.consequent.end);
+        if (/\b(?:return|throw|continue|break|process\.exit)\b/.test(conseqSrc)) continue;
+        let derefFound = false;
+        walkSubtree(nxt, (inner) => {
+          if (derefFound) return;
+          if (inner.type === 'MemberExpression' && !inner.optional && inner.object?.type === 'Identifier' && inner.object.name === guardedVar) {
+            derefFound = true;
+          }
+        });
+        if (derefFound) {
+          emit({
+            id: 'js-unguarded-null-deref',
+            title: `Missing return/throw after null check on "${guardedVar}"`,
+            severity: 'high',
+            cwe: 'CWE-476',
+            hint: `Add a return or throw inside the if-guard for "${guardedVar}", or guard the next statement so "${guardedVar}" is not dereferenced when null/undefined.`,
+          }, nxt, 'high', `Previous null/falsy guard for "${guardedVar}" does not exit, and the next statement accesses "${guardedVar}" unconditionally.`);
+        }
+      }
+    }
+
+    // File-handle leak check: `const fh = await fs.open(...)` without enclosing try/finally.
+    if (node.type === 'VariableDeclarator' && node.id?.type === 'Identifier' && node.init?.type === 'AwaitExpression') {
+      const call = node.init.argument;
+      const calleeStr = call?.type === 'CallExpression' ? memberName(call.callee) : '';
+      const objStr = call?.type === 'CallExpression' ? (call.callee?.object?.name || memberName(call.callee?.object)) : '';
+      if (calleeStr === 'open' && ['fs', 'fsPromises', 'fsp', 'promises'].includes(objStr)) {
+        const handleName = node.id.name;
+        const fnBody = fnStack[fnStack.length - 1]?.body;
+        if (fnBody) {
+          const bodySrc = raw.slice(fnBody.start, fnBody.end);
+          const hasFinallyClose = new RegExp(`finally\\s*\\{[\\s\\S]*\\b${handleName}\\.close\\s*\\(`).test(bodySrc);
+          if (!hasFinallyClose) {
+            emit({
+              id: 'js-resource-leak',
+              title: `File handle "${handleName}" opened without try/finally close`,
+              severity: 'medium',
+              cwe: 'CWE-775',
+              hint: `Close "${handleName}" inside a finally { await ${handleName}.close(); } block so errors do not leak file descriptors.`,
+            }, node, 'medium', `File handle "${handleName}" is opened with fs.open() without a finally block ensuring ${handleName}.close().`);
+          }
         }
       }
     }

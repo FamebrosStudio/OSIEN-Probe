@@ -103,3 +103,78 @@ test('generateFileBatchFixes validates and returns multiple patches in one call'
     await fs.rm(dir, { recursive: true, force: true });
   }
 });
+
+test('multi-hop alias taint, IDOR, CFG null-deref, React effect leak, resource leak, polyglot bugs, and bugsOnly mode', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'osien-nextlevel-'));
+  try {
+    await fs.mkdir(path.join(dir, 'src', 'db'), { recursive: true });
+    await fs.mkdir(path.join(dir, 'src', 'services'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'tsconfig.json'), JSON.stringify({
+      compilerOptions: { paths: { '@/*': ['src/*'] } },
+    }));
+    await fs.writeFile(path.join(dir, 'src', 'db', 'fsRepo.ts'), [
+      'import fs from "node:fs";',
+      'export function loadRaw(p: string) { return fs.readFileSync(p, "utf8"); }',
+    ].join('\n'));
+    await fs.writeFile(path.join(dir, 'src', 'services', 'itemService.ts'), [
+      'import { loadRaw } from "@/db/fsRepo";',
+      'export function readItemFile(name: string) { return loadRaw(name); }',
+    ].join('\n'));
+    await fs.writeFile(path.join(dir, 'src', 'handler.ts'), [
+      'import fs from "node:fs/promises";',
+      'import { readItemFile } from "@/services/itemService";',
+      'export async function handle(req: any, res: any, user: any, db: any, router: any, requireAuth: any) {',
+      '  if (!user) { console.error("no user"); }',
+      '  const id = user.id;',
+      '  const fh = await fs.open(id, "r");',
+      '  await fh.readFile();',
+      '  router.delete("/api/posts/:id", requireAuth, (r: any, s: any) => db.posts.delete({ where: { id: r.params.id } }));',
+      '  return res.send(readItemFile(req.query.path));',
+      '}',
+    ].join('\n'));
+    await fs.writeFile(path.join(dir, 'src', 'Widget.tsx'), [
+      'import { useEffect } from "react";',
+      'export function Widget() {',
+      '  useEffect(() => { window.addEventListener("resize", () => {}); }, []);',
+      '  return null;',
+      '}',
+    ].join('\n'));
+    await fs.writeFile(path.join(dir, 'src', 'style.css'), '.a { color: red !important; }\n');
+    await fs.writeFile(path.join(dir, 'src', 'worker.py'), [
+      'def add_item(item, bucket=[]):',
+      '    bucket.append(item)',
+      '    try:',
+      '        return bucket',
+      '    except:',
+      '        pass',
+    ].join('\n'));
+    await fs.writeFile(path.join(dir, 'src', 'main.go'), [
+      'package main',
+      'import "os"',
+      'func readAll(paths []string) {',
+      '    for _, p := range paths {',
+      '        f, _ := os.Open(p)',
+      '        defer f.Close()',
+      '    }',
+      '}',
+    ].join('\n'));
+
+    const full = await scanProjectRoot(dir, 'API / backend');
+    const ids = new Set(full.findings.map((f) => f.ruleId));
+    assert.ok(ids.has('js-crossfile-taint'), `Expected multi-hop js-crossfile-taint, got: ${[...ids]}`);
+    assert.ok(ids.has('js-idor-missing-ownership'), `Expected js-idor-missing-ownership, got: ${[...ids]}`);
+    assert.ok(ids.has('js-unguarded-null-deref'), `Expected js-unguarded-null-deref, got: ${[...ids]}`);
+    assert.ok(ids.has('js-resource-leak'), `Expected js-resource-leak, got: ${[...ids]}`);
+    assert.ok(ids.has('js-react-effect-leak'), `Expected js-react-effect-leak, got: ${[...ids]}`);
+    assert.ok(ids.has('py-mutable-default') || ids.has('polyglot-python-mutable-default'), `Expected Python mutable default rule, got: ${[...ids]}`);
+    assert.ok(ids.has('py-bare-except') || ids.has('polyglot-python-bare-except'), `Expected Python bare except rule, got: ${[...ids]}`);
+    assert.ok(ids.has('css-important'), 'Expected css-important in default scan');
+
+    const bugsOnly = await scanProjectRoot(dir, 'API / backend', { bugsOnly: true });
+    const bugOnlyIds = new Set(bugsOnly.findings.map((f) => f.ruleId));
+    assert.ok(!bugOnlyIds.has('css-important'), 'Expected css-important excluded in bugsOnly mode');
+    assert.ok(bugOnlyIds.has('js-crossfile-taint'), 'Expected real bugs preserved in bugsOnly mode');
+  } finally {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+});
