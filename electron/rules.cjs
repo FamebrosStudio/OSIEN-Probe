@@ -311,7 +311,7 @@ const shared = [
     'cursor.execute("SELECT * FROM users WHERE id=%s", [user_id])',
     'Use driver parameters, not f-strings.'),
   py('py-sql-percent', 'SQL built with percent formatting', 'high', 'CWE-89',
-    /["']\s*%\s*\(?\s*[A-Za-z_]\w*/,
+    /(?:SELECT|INSERT|UPDATE|DELETE)\b[^"'\n]*["']\s*%\s*\(?\s*[A-Za-z_]\w*/i,
     'cursor.execute("SELECT * FROM users WHERE id=%s" % user_id)',
     'cursor.execute("SELECT * FROM users WHERE id=%s", [user_id])',
     'Percent formatting bypasses parameter binding.'),

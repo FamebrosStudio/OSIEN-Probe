@@ -408,7 +408,7 @@ const extraShared = [
   ]),
 
   ...compilePack(json, 'exp-json', [
-    ['npm-git-dep', 'package.json dependency points to unpinned git URL', 'medium', 'CWE-829', /"(?:git\+(?:https?|ssh)|github):[^"]+"/i,
+    ['npm-git-dep', 'package.json dependency points to unpinned git URL', 'medium', 'CWE-829', /"(?!(?:url|repository|homepage|bugs|git)")[a-z0-9@/_.-]+"\s*:\s*"(?:git\+(?:https?|ssh)|github):[^"]+"/i,
       '{"dependencies":{"pkg":"git+https://github.com/org/repo.git"}}', '{"dependencies":{"pkg":"^1.2.3"}}', 'Pin dependencies to immutable registry versions or exact commit hashes.'],
     ['npm-file-dep-parent', 'package.json references parent directory file:.. dependency', 'low', 'CWE-829', /"file:\.\.\//,
       '{"dependencies":{"shared":"file:../shared"}}', '{"dependencies":{"shared":"^1.0.0"}}', 'Parent file: paths break reproducible builds across machines.'],
@@ -630,7 +630,7 @@ function buildParameterizedSharedRules() {
       `Unsafe C/native function ${fnName}() detected`,
       sev,
       cwe,
-      new RegExp(`\\b${fnName}\\s*\\(`),
+      new RegExp(`(?:^|[^.\\w])${fnName}\\s*\\(`),
       `${fnName}(buf);`,
       'safe_bounded_op(buf, sizeof(buf));',
       hint,
@@ -884,8 +884,8 @@ function buildParameterizedSharedRules() {
       'window.addEventListener("resize", () => recalc());', 'window.addEventListener("resize", onResize);', 'Keep a handler reference if you need removeEventListener() on cleanup.'],
     ['new-promise-reject-str', 'Promise rejected with string instead of Error object', 'low', 'CWE-755', /\breject\s*\(\s*['"][^'"]+['"]\s*\)/,
       'reject("failed");', 'reject(new Error("failed"));', 'Reject Promises with Error instances so stack traces are preserved.'],
-    ['throw-string-literal', 'Throwing a string literal instead of an Error', 'low', 'CWE-755', /\bthrow\s+['"][^'"]+['"]/,
-      'throw "invalid input";', 'throw new Error("invalid input");', 'Throw Error instances so callers receive stack traces and .message.'],
+    ['delete-array-index', 'delete arr[i] leaves sparse undefined holes in arrays', 'medium', 'CWE-480', /\bdelete\s+[A-Za-z_$][\w$]*\s*\[\s*(?:\d+|[a-z]|idx|index)\s*\]/,
+      'delete items[0];', 'items.splice(0, 1);', 'Use Array.prototype.splice() or filter() instead of delete on array indices.'],
     ['console-trace-left', 'console.trace() left in source', 'info', 'CWE-489', /\bconsole\.trace\s*\(/,
       'console.trace("debug");', 'logger.debug("debug");', 'Remove console.trace() debug calls before shipping.'],
     ['alert-confirm-prompt', 'Blocking browser alert/confirm/prompt dialog', 'low', 'CWE-710', /(?<![.\w$])\b(?:alert|confirm|prompt)\s*\(/,

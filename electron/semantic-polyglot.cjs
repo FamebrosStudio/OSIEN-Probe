@@ -193,7 +193,7 @@ function analyzeCrossFilePolyglot(polyglotFiles) {
         const defMatch = lines[i].match(/^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(([^)]*)\)/);
         if (!defMatch) continue;
         const fnName = defMatch[1];
-        const params = defMatch[2].split(',').map((p) => p.trim().split(/[:=]/)[0].trim()).filter((p) => p && p !== 'self' && p !== 'cls');
+        const params = defMatch[2].split(',').map((p) => p.trim().split(/[:=]/)[0].trim().replace(/^\*+/, '')).filter((p) => /^[A-Za-z_]\w*$/.test(p) && p !== 'self' && p !== 'cls');
         if (!params.length) continue;
         const body = lines.slice(i + 1, Math.min(lines.length, i + 25)).join('\n');
         if (PY_SINK_RE.test(body) && params.some((p) => new RegExp(`\\b${p}\\b`).test(body))) {
@@ -205,7 +205,7 @@ function analyzeCrossFilePolyglot(polyglotFiles) {
         const fnMatch = lines[i].match(/^\s*func\s+([A-Z][A-Za-z0-9_]*)\s*\(([^)]*)\)/);
         if (!fnMatch) continue;
         const fnName = fnMatch[1];
-        const params = fnMatch[2].split(',').map((p) => p.trim().split(/\s+/)[0]).filter(Boolean);
+        const params = fnMatch[2].split(',').map((p) => p.trim().split(/\s+/)[0]).filter((p) => /^[A-Za-z_]\w*$/.test(p));
         if (!params.length) continue;
         const body = lines.slice(i + 1, Math.min(lines.length, i + 30)).join('\n');
         if (GO_SINK_RE.test(body) && params.some((p) => new RegExp(`\\b${p}\\b`).test(body))) {

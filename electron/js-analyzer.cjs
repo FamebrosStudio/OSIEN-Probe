@@ -940,7 +940,10 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       if (FILE_SINKS.has(name) && node.arguments.some(containsInput)) {
         emit('js-path-traversal', node, 'high', 'Request-controlled data reaches a filesystem path.');
       }
-      if (name === 'redirect' && (node.arguments.some(containsInput) || (node.arguments[0] && !staticText(node.arguments[0])))) {
+      const isRelativeRedirectTpl = (arg) => arg?.type === 'TemplateLiteral'
+        && typeof arg.quasis?.[0]?.value?.raw === 'string'
+        && /^\/(?!\/)/.test(arg.quasis[0].value.raw);
+      if (name === 'redirect' && (node.arguments.some(containsInput) || (node.arguments[0] && !staticText(node.arguments[0]) && !isRelativeRedirectTpl(node.arguments[0])))) {
         const hasInput = containsInput(node.arguments[0]);
         emit({
           id: 'js-redirect-param',

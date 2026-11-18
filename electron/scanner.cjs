@@ -33,6 +33,7 @@ const polyglotLegacyRuleIds = {
   'polyglot-python-marshal': new Set(['py-marshal-load']),
   'polyglot-python-yaml-load': new Set(['py-yaml-load']),
   'polyglot-python-shell': new Set(['py-os-system', 'py-subprocess-shell', 'py-subprocess-string']),
+  'polyglot-python-weak-hash': new Set(['py-weak-hash']),
   'polyglot-bash-eval': new Set(['sh-eval']),
 };
 
@@ -78,7 +79,8 @@ const PLACEHOLDER = /^(?:example|sample|changeme|change-me|your[-_].*|placeholde
 const TEST_FILE_PATH = /(?:^|[\\/])(?:tests?|__tests__|spec)[\\/]|(?:\.test|\.spec)\.[cm]?[jt]sx?$/i;
 
 function looksLikePlaceholder(value) {
-  if (PLACEHOLDER.test(value) || /^\*+$/.test(value) || /(?:^|[-_])(?:test|mock|dummy|fake|example)(?:[-_]|$)/i.test(value)) return true;
+  if (PLACEHOLDER.test(value) || /^\*+$/.test(value) || /\.\.\.$/.test(value) || /(?:^|[-_])(?:test|mock|dummy|fake|example)(?:[-_]|$)/i.test(value)) return true;
+  if (/^(?:refresh_token|access_token|id_token|authorization_code|client_credentials|bearer|oauth_token)$/i.test(value.trim())) return true;
   // Multi-word UI/validation prose like "Password is required" is not a credential
   const words = value.trim().split(/\s+/);
   return words.length >= 2 && words.length <= 8 && /^[A-Za-z0-9\s.,!?'"():-]+$/.test(value);
@@ -643,9 +645,10 @@ function scanFileContent(raw, rel, extName, lang, catalog, applicableByLang) {
       : rule.lang === 'html' ? lines : commentLines;
     const foundLines = new Set();
 
-    const isExampleEnv = /\.env\.(?:example|sample|template|dist)$/i.test(rel);
+    const isExampleEnv = /\.env(?:\.[a-z0-9_-]+)?\.(?:example|sample|template|dist)$/i.test(rel);
     const isTestFixture = /(?:^|[\\/])(?:test|tests|__tests__|testdata|spec|specs|fixtures?|mocks?|__mocks__)(?:[\\/]|$)|(?:_test\.go|\.test\.[cm]?[jt]sx?|\.spec\.[cm]?[jt]sx?|test_[^\\/]+\.py)$/i.test(rel);
     if ((isExampleEnv || isTestFixture) && rule.id.startsWith('secret-')) continue;
+    if (rule.id === 'py-wildcard-import' && /(?:^|[\\/])__init__\.py$/i.test(rel)) continue;
     if (rule.multi) {
       const rawTextLines = lines.map((line, index) =>
         isRawCode && !codeLines[index].trim() ? line.replace(/[^\n]/g, ' ') : line,
