@@ -112,3 +112,37 @@ test('real-world false-positive regression guard (JSX attrs, JSON-LD, model.eval
   const report = await scanProjectRoot(dir, 'Website', { bugsOnly: true });
   assert.equal(report.findings.length, 0, `expected 0 false positives, got: ${report.findings.map((f) => `${f.ruleId}:${f.line}`).join(', ')}`);
 });
+
+test('deep security detectors: timing-unsafe compare, mass assignment, unawaited !async(), Next.js & Python missing route auth', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'deepcheck-deepsec-'));
+  await fs.mkdir(path.join(dir, 'src', 'app', 'api', 'admin'), { recursive: true });
+  await fs.writeFile(path.join(dir, 'src', 'app', 'api', 'admin', 'route.ts'), [
+    'export async function POST(req: any) {',
+    '  const body = req.body;',
+    '  await User.create(req.body);',
+    '  return Response.json({ ok: true });',
+    '}',
+  ].join('\n'));
+  await fs.writeFile(path.join(dir, 'security.js'), [
+    'async function isAdmin(u) { return Boolean(u && u.admin); }',
+    'function check(sig, hmac, user) {',
+    '  if (sig === hmac) return true;',
+    '  if (!isAdmin(user)) return false;',
+    '  return false;',
+    '}',
+  ].join('\n'));
+  await fs.writeFile(path.join(dir, 'api.py'), [
+    '@app.delete("/items/{item_id}")',
+    'def delete_item(item_id: int, db=None):',
+    '    db.execute("DELETE FROM items WHERE id=%s", [item_id])',
+    '    db.commit()',
+  ].join('\n'));
+
+  const report = await scanProjectRoot(dir, 'API / backend', { bugsOnly: true });
+  const ids = new Set(report.findings.map((f) => f.ruleId));
+  assert.ok(ids.has('js-timing-unsafe-secret-cmp'), 'detects non-constant-time hmac comparison');
+  assert.ok(ids.has('js-promise-in-condition'), 'detects !isAdmin(user) without await');
+  assert.ok(ids.has('js-mass-assignment-db'), 'detects User.create(req.body) mass assignment');
+  assert.ok(ids.has('js-nextjs-api-no-auth'), 'detects Next.js mutating API route without auth');
+  assert.ok(ids.has('py-route-missing-auth'), 'detects Python mutating route without auth');
+});

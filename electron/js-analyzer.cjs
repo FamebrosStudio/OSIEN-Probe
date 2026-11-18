@@ -724,16 +724,33 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       }, node, 'high', `"!x ${node.operator} y" is parsed as "(!x) ${node.operator} y", not "!(x ${node.operator} y)".`);
     }
 
-    // Promise returned by known async function used directly in if/while condition without await.
-    if ((node.type === 'IfStatement' || node.type === 'WhileStatement') && node.test?.type === 'CallExpression'
-      && node.test.callee?.type === 'Identifier' && asyncFnNames.has(node.test.callee.name)) {
+    // Non-constant-time secret/HMAC/signature comparison (timing side-channel).
+    if (node.type === 'BinaryExpression' && ['===', '!==', '==', '!='].includes(node.operator)) {
+      const isLit = (n) => !n || ['StringLiteral', 'NumericLiteral', 'BooleanLiteral', 'NullLiteral'].includes(n.type);
+      const TIMING_SECRET_RE = /\b(?:hmac|signature|webhookSecret|signingKey|expectedSig|actualSig|computedSig)\b/i;
+      if (!isLit(node.left) && !isLit(node.right)
+        && (TIMING_SECRET_RE.test(identifierName(node.left)) || TIMING_SECRET_RE.test(identifierName(node.right)))) {
+        emit({
+          id: 'js-timing-unsafe-secret-cmp',
+          title: 'Non-constant-time secret/signature comparison',
+          severity: 'high',
+          cwe: 'CWE-208',
+          hint: 'Use crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b)) to prevent timing side-channel attacks.',
+        }, node, 'high', 'Comparing cryptographic signatures or webhook secrets with === leaks length/prefix timing.');
+      }
+    }
+
+    // Promise returned by known async function used directly in if/while/negation/ternary condition without await.
+    const testExpr = node.type === 'UnaryExpression' && node.operator === '!' ? node.argument
+      : (node.type === 'IfStatement' || node.type === 'WhileStatement' || node.type === 'ConditionalExpression') ? node.test : null;
+    if (testExpr?.type === 'CallExpression' && testExpr.callee?.type === 'Identifier' && asyncFnNames.has(testExpr.callee.name)) {
       emit({
         id: 'js-promise-in-condition',
-        title: `Async function "${node.test.callee.name}()" tested without await`,
+        title: `Async function "${testExpr.callee.name}()" tested without await`,
         severity: 'high',
         cwe: 'CWE-480',
-        hint: `Add "await" before ${node.test.callee.name}(); a Promise object is always truthy.`,
-      }, node.test, 'high', `Calling async "${node.test.callee.name}()" without await returns a Promise, which is always truthy.`);
+        hint: `Add "await" before ${testExpr.callee.name}(); a Promise object is always truthy.`,
+      }, testExpr, 'high', `Calling async "${testExpr.callee.name}()" without await returns a Promise, which is always truthy.`);
     }
 
     // Throwing a string/number literal instead of an Error object loses stack trace.
@@ -939,6 +956,17 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       }
       if (FILE_SINKS.has(name) && node.arguments.some(containsInput)) {
         emit('js-path-traversal', node, 'high', 'Request-controlled data reaches a filesystem path.');
+      }
+      if (['create', 'update', 'insertOne', 'updateOne', 'findByIdAndUpdate', 'findOneAndUpdate'].includes(name)
+        && node.arguments.some((arg) => arg?.type === 'MemberExpression' && containsInput(arg))
+        && !/\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(file || '')) {
+        emit({
+          id: 'js-mass-assignment-db',
+          title: `Unfiltered request payload passed to .${name}() (Mass Assignment)`,
+          severity: 'high',
+          cwe: 'CWE-915',
+          hint: 'Explicitly pick/validate allowed fields (e.g. via Zod) before passing data to ORM/DB write methods.',
+        }, node, 'high', `Raw request body is passed directly to .${name}(), risking privilege-escalation field injection.`);
       }
       const isRelativeRedirectTpl = (arg) => arg?.type === 'TemplateLiteral'
         && typeof arg.quasis?.[0]?.value?.raw === 'string'
@@ -1192,6 +1220,26 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
   };
 
   visit(ast, null, '');
+
+  // Next.js App Router mutating API handler without server-side auth check
+  if (/(?:^|[\\/])app[\\/]api[\\/].*route\.[jt]sx?$/i.test(file || '')
+    && !/[\\/](?:auth|login|register|signup|logout|webhook|leads|contact|enquiry|health)[\\/]/i.test(file || '')) {
+    const hasMutatingHandler = /\bexport\s+(?:async\s+)?function\s+(?:POST|PUT|PATCH|DELETE)\b/.test(raw);
+    const hasDbOrFsWrite = /\.(?:create|update|delete|insert|save|findByIdAnd|writeFile|unlink|upload)\b/.test(raw);
+    const hasAuthCheck = /\b(?:getSession|getServerSession|verifyAuth|requireAuth|isAuthenticated|currentUser|cookies\s*\(|jwt\.verify|checkAuth|authenticate|authorization)\b/i.test(raw);
+    if (hasMutatingHandler && hasDbOrFsWrite && !hasAuthCheck) {
+      const m = raw.match(/\bexport\s+(?:async\s+)?function\s+(POST|PUT|PATCH|DELETE)\b/);
+      const line = m ? raw.slice(0, m.index).split(/\r?\n/).length : 1;
+      findings.push(makeFinding({
+        id: 'js-nextjs-api-no-auth',
+        title: `Next.js ${m ? m[1] : 'mutating'} API route performs writes without server-side auth check`,
+        severity: 'high',
+        cwe: 'CWE-306',
+        hint: 'Verify the caller session/token on the server before mutating database or filesystem state.',
+      }, file, line, raw.split(/\r?\n/)[line - 1] || '', { confidence: 'high', reason: 'Mutating Next.js App Router handler has DB/file write calls and no recognized auth guard.' }));
+    }
+  }
+
   return findings;
 }
 

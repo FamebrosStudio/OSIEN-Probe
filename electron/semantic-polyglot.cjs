@@ -132,6 +132,27 @@ function analyzePythonTaint(raw, rel) {
       }
     }
   }
+
+  // Python mutating FastAPI/Flask route without auth dependency/decorator
+  const pyRouteRe = /^\s*@(?:app|router)\.(post|put|patch|delete)\s*\(([^)]*)\)/gim;
+  let rm;
+  while ((rm = pyRouteRe.exec(raw)) !== null) {
+    if (/login|register|signup|auth|token|webhook|health/i.test(rm[2])) continue;
+    const lineIdx = raw.slice(0, rm.index).split(/\r?\n/).length;
+    const block = lines.slice(lineIdx - 1, Math.min(lines.length, lineIdx + 18)).join('\n');
+    const hasWrite = /(?:\.commit\(|\.execute\(|\.delete\(|\.save\(|\binsert\b|\bupdate\b|\bunlink\b)/i.test(block);
+    const hasAuth = /\b(?:Depends|current_user|login_required|jwt|verify_token|Authorization|get_current_user|session)\b/i.test(block);
+    if (hasWrite && !hasAuth) {
+      findings.push(buildFinding(
+        rel, lineIdx, 'py-route-missing-auth',
+        `Mutating Python ${rm[1].toUpperCase()} route lacks auth dependency/guard`,
+        'high', 'CWE-306',
+        'Add Depends(get_current_user) or @login_required to protect mutating endpoints.',
+        'Mutating Python route writes to DB/storage without an authentication dependency.',
+        lines[lineIdx - 1],
+      ));
+    }
+  }
   return findings;
 }
 
