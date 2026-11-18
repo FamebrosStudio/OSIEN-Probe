@@ -158,10 +158,20 @@ select, select option, input, textarea {
   top: 0;
   z-index: 20;
   height: 60px;
-  padding: 0 36px;
+  padding: 0 156px 0 36px;
   background: rgba(12, 13, 14, 0.84);
   backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+}
+.topbar button,
+.topbar a,
+.topbar input,
+.topbar select {
+  -webkit-app-region: no-drag;
+}
+.sidebar .brand {
+  -webkit-app-region: drag;
 }
 
 .content {

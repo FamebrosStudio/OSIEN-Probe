@@ -8,6 +8,7 @@
   "type": "module",
   "main": "electron/main.cjs",
   "bin": {
+    "probe": "./bin/osien-probe.cjs",
     "osien-probe": "./bin/osien-probe.cjs",
     "osien-probe-mcp": "./bin/osien-probe-mcp.cjs"
   },

@@ -2,3 +2,4 @@
 tests/**
 electron/rules.cjs
 electron/rules-expanded.cjs
+electron/rules-mega.cjs

@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, dialog, ipcMain, shell, session } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell, session, Menu } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs/promises');
 const { execFile } = require('node:child_process');
@@ -55,11 +55,23 @@ async function publicAiConfig(cfg) {
 async function readProjects() { try { return JSON.parse(await fs.readFile(statePath(), 'utf8')); } catch { return []; } }
 async function saveProjects(projects) { await fs.mkdir(path.dirname(statePath()), { recursive: true }); await fs.writeFile(statePath(), JSON.stringify(projects, null, 2), 'utf8'); }
 function createWindow() {
-  const win = new BrowserWindow({ width: 1440, height: 920, minWidth: 1000, minHeight: 680, backgroundColor: '#101112', title: 'OSIEN Probe', icon: path.join(__dirname, '../build/icon.png'), webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false } });
+  const win = new BrowserWindow({
+    width: 1440,
+    height: 920,
+    minWidth: 1000,
+    minHeight: 680,
+    backgroundColor: '#0c0d0e',
+    title: 'OSIEN Probe',
+    icon: path.join(__dirname, '../build/icon.png'),
+    autoHideMenuBar: true,
+    titleBarStyle: process.platform === 'linux' ? 'default' : 'hidden',
+    ...(process.platform === 'win32' ? { titleBarOverlay: { color: '#0c0d0e', symbolColor: '#d7dce5', height: 44 } } : {}),
+    webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false },
+  });
   if (process.env.VITE_DEV_SERVER_URL) win.loadURL(process.env.VITE_DEV_SERVER_URL); else win.loadFile(path.join(__dirname, '../dist/index.html'));
 }
 if (process.versions.electron && typeof ipcMain?.handle === 'function') {
-  app.whenReady().then(() => { createWindow(); app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); }); }).catch(() => app.quit());
+  app.whenReady().then(() => { Menu.setApplicationMenu(null); createWindow(); app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow(); }); }).catch(() => app.quit());
   app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 }
 // IPC handlers remain registered only in the app process; tests call scanProjectRoot directly.
