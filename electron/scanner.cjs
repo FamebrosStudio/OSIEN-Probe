@@ -10,6 +10,8 @@ const fs = require('node:fs/promises');
 const { analyzeJavaScriptAst } = require('./js-analyzer.cjs');
 const { analyzeCrossFileProject } = require('./cross-file-analyzer.cjs');
 const { analyzePolyglot, languageByExtension } = require('./polyglot.cjs');
+const { analyzeSemanticPolyglot } = require('./semantic-polyglot.cjs');
+const { auditDependencies } = require('./dependency-auditor.cjs');
 const { shared, categoryRules, SEVERITY_WEIGHT } = require('./rules.cjs');
 
 const kinds = ['Website', 'Software', 'API / backend', 'Mobile app', 'Library', 'Data / ML', 'Cloud / DevOps', 'Blockchain / Web3', 'Desktop / Electron', 'CLI / Automation'];
@@ -58,9 +60,9 @@ const langByExt = {
   '.go': 'generic', '.rs': 'generic', '.java': 'generic', '.kt': 'generic', '.kts': 'generic',
   '.php': 'generic', '.rb': 'generic', '.cs': 'generic', '.c': 'generic', '.h': 'generic',
   '.cc': 'generic', '.cpp': 'generic', '.hpp': 'generic', '.swift': 'generic', '.dart': 'generic',
-  '.scala': 'generic', '.toml': 'generic', '.ini': 'generic', '.cfg': 'generic', '.conf': 'generic',
+  '.scala': 'generic', '.sol': 'generic', '.toml': 'generic', '.ini': 'generic', '.cfg': 'generic', '.conf': 'generic',
   '.properties': 'generic', '.gradle': 'generic', '.tf': 'generic', '.tfvars': 'generic',
-  '.hcl': 'generic', '.bicep': 'generic', '.sol': 'generic', '.vy': 'generic',
+  '.hcl': 'generic', '.bicep': 'generic', '.vy': 'generic',
   '.move': 'generic', '.cairo': 'generic', '.pug': 'generic', '.jade': 'generic',
   '.ejs': 'html', '.hbs': 'html',
 };
@@ -719,6 +721,11 @@ function scanFileContent(raw, rel, extName, lang, catalog, applicableByLang) {
       findings.push(finding);
     }
   }
+  for (const finding of analyzeSemanticPolyglot(raw, rel, extName)) {
+    if (!suppressed(suppressions, finding.line, finding.ruleId)) {
+      findings.push(finding);
+    }
+  }
   return { findings, rulesEvaluated: applicable.length };
 }
 
@@ -800,6 +807,14 @@ async function scanProjectRoot(root, kind, options = {}) {
     }
   }
 
+  if (!truncated) {
+    const depFindings = await auditDependencies(scanRoot);
+    for (const finding of depFindings) {
+      findings.push(finding);
+      if (findings.length >= MAX_FINDINGS) { truncated = true; break; }
+    }
+  }
+
   findings.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line || String(a.ruleId).localeCompare(String(b.ruleId)));
 
   const testPlan = await discoverTestPlan(scanRoot);
@@ -812,6 +827,7 @@ async function scanProjectRoot(root, kind, options = {}) {
     'js-v' + 'ar', 'py-print', 'py-todo', 'ml-print-progress', 'lib-console-log-noise',
     'exp-logic-return-await-redundancy', 'exp-js-isNaN-global', 'exp-js-parseint-no-radix',
     'html-no-csp', 'html-noscript', 'polyglot-syntax-error', 'js-undeclared-var',
+    'js-promise-no-catch', 'js-fixme', 'js-disabled-test',
   ]);
   const filteredFindings = options.bugsOnly ? uniqueFindings.filter((f) => !styleHintRules.has(f.ruleId)) : uniqueFindings;
   const selected = options.maxFindings ? filteredFindings.slice(0, options.maxFindings) : filteredFindings;
