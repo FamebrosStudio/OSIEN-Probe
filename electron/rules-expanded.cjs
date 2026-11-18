@@ -401,10 +401,10 @@ const extraShared = [
       '<embed src="/legacy.swf">', '<video src="/media.mp4" controls></video>', 'Avoid legacy plugin tags; use native HTML5 media elements.'],
     ['svg-script-tag', 'Executable <script> embedded inside <svg>', 'high', 'CWE-79', /<svg\b[\s\S]{0,400}<script\b/i,
       '<svg><script>alert(1)</script></svg>', '<svg viewBox="0 0 24 24"></svg>', 'Strip <script> tags from inline SVGs to prevent SVG XSS.'],
-    ['img-no-alt', '<img> element missing alt attribute', 'info', 'CWE-1084', /<img\b(?![^>]*\balt\s*=)[^>]*>/i,
-      '<img src="/hero.png">', '<img src="/hero.png" alt="Product preview">', 'Provide descriptive alt text (or alt="" for decorative images).'],
-    ['button-no-type', '<button> without explicit type defaults to submit in forms', 'info', 'CWE-670', /<button\b(?![^>]*\btype\s*=)[^>]*>/i,
-      '<button onclick="openMenu()">Menu</button>', '<button type="button" id="menu">Menu</button>', 'Specify type="button" or type="submit" explicitly on <button>.'],
+    ['iframe-sandbox-both', '<iframe> combines allow-scripts and allow-same-origin (sandbox bypass)', 'high', 'CWE-693', /<iframe\b[^>]*\bsandbox\s*=\s*['"][^'"]*allow-scripts[^'"]*allow-same-origin/i,
+      '<iframe src="https://untrusted.example" sandbox="allow-scripts allow-same-origin"></iframe>', '<iframe src="https://untrusted.example" sandbox="allow-scripts"></iframe>', 'Do not combine allow-scripts and allow-same-origin on untrusted iframes.'],
+    ['object-data-http', '<object data="http://..."> loads plugin/active content over HTTP', 'high', 'CWE-319', /<object\b[^>]*\bdata\s*=\s*['"]http:\/\/(?!localhost|127\.0\.0\.1)/i,
+      '<object data="http://cdn.example.com/widget.swf"></object>', '<object data="https://cdn.example.com/widget.swf"></object>', 'Load <object> data strictly over HTTPS.'],
   ]),
 
   ...compilePack(json, 'exp-json', [

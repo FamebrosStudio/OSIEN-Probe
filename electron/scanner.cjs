@@ -10,7 +10,7 @@ const fs = require('node:fs/promises');
 const { analyzeJavaScriptAst } = require('./js-analyzer.cjs');
 const { analyzeCrossFileProject } = require('./cross-file-analyzer.cjs');
 const { analyzePolyglot, languageByExtension } = require('./polyglot.cjs');
-const { analyzeSemanticPolyglot } = require('./semantic-polyglot.cjs');
+const { analyzeSemanticPolyglot, analyzeCrossFilePolyglot } = require('./semantic-polyglot.cjs');
 const { auditDependencies } = require('./dependency-auditor.cjs');
 const { shared, categoryRules, SEVERITY_WEIGHT } = require('./rules.cjs');
 
@@ -644,7 +644,8 @@ function scanFileContent(raw, rel, extName, lang, catalog, applicableByLang) {
     const foundLines = new Set();
 
     const isExampleEnv = /\.env\.(?:example|sample|template|dist)$/i.test(rel);
-    if (isExampleEnv && rule.id.startsWith('secret-')) continue;
+    const isTestFixture = /(?:^|[\\/])(?:test|tests|__tests__|testdata|spec|specs|fixtures?|mocks?|__mocks__)(?:[\\/]|$)|(?:_test\.go|\.test\.[cm]?[jt]sx?|\.spec\.[cm]?[jt]sx?|test_[^\\/]+\.py)$/i.test(rel);
+    if ((isExampleEnv || isTestFixture) && rule.id.startsWith('secret-')) continue;
     if (rule.multi) {
       const rawTextLines = lines.map((line, index) =>
         isRawCode && !codeLines[index].trim() ? line.replace(/[^\n]/g, ' ') : line,
@@ -771,6 +772,7 @@ async function scanProjectRoot(root, kind, options = {}) {
   let truncated = false;
   const CONCURRENCY = 16;
   const jsFiles = [];
+  const polyglotFiles = [];
 
   for (let start = 0; start < candidates.length && !truncated; start += CONCURRENCY) {
     const batch = candidates.slice(start, start + CONCURRENCY);
@@ -783,6 +785,7 @@ async function scanProjectRoot(root, kind, options = {}) {
       if (raw.includes('\u0000')) return null;
       const lang = langByExt[extName] || 'generic';
       if (lang === 'js' && jsFiles.length < 400) jsFiles.push({ rel, raw, extName });
+      if ((extName === '.py' || extName === '.go') && polyglotFiles.length < 400) polyglotFiles.push({ rel, raw, extName });
       return { lang, ...scanFileContent(raw, rel, extName, lang, catalog, applicableByLang) };
     }));
 
@@ -802,6 +805,13 @@ async function scanProjectRoot(root, kind, options = {}) {
   if (!truncated && !options.skipCrossFile && jsFiles.length > 0) {
     const cross = await analyzeCrossFileProject(jsFiles, { makeFinding, parseSuppressions: suppressionMap, isSuppressed: suppressed }, scanRoot);
     for (const finding of cross.findings) {
+      findings.push(finding);
+      if (findings.length >= MAX_FINDINGS) { truncated = true; break; }
+    }
+  }
+
+  if (!truncated && !options.skipCrossFile && polyglotFiles.length > 1) {
+    for (const finding of analyzeCrossFilePolyglot(polyglotFiles)) {
       findings.push(finding);
       if (findings.length >= MAX_FINDINGS) { truncated = true; break; }
     }
@@ -827,7 +837,7 @@ async function scanProjectRoot(root, kind, options = {}) {
     'js-v' + 'ar', 'py-print', 'py-todo', 'ml-print-progress', 'lib-console-log-noise',
     'exp-logic-return-await-redundancy', 'exp-js-isNaN-global', 'exp-js-parseint-no-radix',
     'html-no-csp', 'html-noscript', 'polyglot-syntax-error', 'js-undeclared-var',
-    'js-promise-no-catch', 'js-fixme', 'js-disabled-test',
+    'js-promise-no-catch', 'js-fixme', 'js-disabled-test', 'exp-logic-addeventlistener-anon',
   ]);
   const filteredFindings = options.bugsOnly ? uniqueFindings.filter((f) => !styleHintRules.has(f.ruleId)) : uniqueFindings;
   const selected = options.maxFindings ? filteredFindings.slice(0, options.maxFindings) : filteredFindings;

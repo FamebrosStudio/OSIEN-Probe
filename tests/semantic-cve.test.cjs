@@ -69,3 +69,23 @@ test('semantic polyglot detects Solidity CEI reentrancy, unprotected init, and P
   const safeWithdrawFlags = report.findings.filter((f) => f.ruleId === 'sol-reentrancy-cei' && f.line >= 10);
   assert.equal(safeWithdrawFlags.length, 0, 'does not flag nonReentrant safeWithdraw');
 });
+
+test('monorepo lockfile CVE audit and Python/Go cross-file taint detection', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'deepcheck-xpoly-'));
+  await fs.mkdir(path.join(dir, 'packages', 'web'), { recursive: true });
+  await fs.writeFile(path.join(dir, 'packages', 'web', 'package-lock.json'), JSON.stringify({
+    packages: { 'node_modules/minimist': { version: '1.2.5' } },
+  }));
+  await fs.writeFile(path.join(dir, 'Cargo.lock'), '[[package]]\nname = "hyper"\nversion = "0.14.20"\n');
+  await fs.writeFile(path.join(dir, 'db_helpers.py'), 'def run_user_query(cursor, q):\n    cursor.execute("SELECT * FROM t WHERE a=" + q)\n');
+  await fs.writeFile(path.join(dir, 'routes.py'), 'def endpoint(request, cursor):\n    name = request.args.get("name")\n    run_user_query(cursor, name)\n');
+  await fs.writeFile(path.join(dir, 'store.go'), 'package main\nfunc FindUser(db *sql.DB, q string) {\n    db.Query("SELECT * FROM u WHERE n=" + q)\n}\n');
+  await fs.writeFile(path.join(dir, 'api.go'), 'package main\nfunc Handle(r *http.Request, db *sql.DB) {\n    name := r.URL.Query().Get("n")\n    FindUser(db, name)\n}\n');
+
+  const report = await scanProjectRoot(dir, 'API / backend');
+  const ids = new Set(report.findings.map((f) => f.ruleId));
+  assert.ok(ids.has('dep-npm-minimist-cve'), 'flags vulnerable minimist in nested monorepo package-lock.json');
+  assert.ok(ids.has('dep-rust-hyper-cve'), 'flags vulnerable hyper in Cargo.lock');
+  assert.ok(ids.has('py-crossfile-taint'), 'detects Python cross-file taint');
+  assert.ok(ids.has('go-crossfile-taint'), 'detects Go cross-file taint');
+});

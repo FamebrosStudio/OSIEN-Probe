@@ -1,9 +1,15 @@
 'use strict';
 
-// Offline dependency CVE & supply-chain auditor for package.json, requirements.txt, and go.mod.
+// Offline dependency CVE & supply-chain auditor across monorepo manifests and lockfiles:
+// package.json, package-lock.json, requirements.txt, go.mod, and Cargo.lock.
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
+
+const SKIP_DIRS = new Set([
+  '.git', 'node_modules', 'dist', 'build', 'coverage', '.next', '.turbo',
+  '.cache', 'vendor', 'target', '.venv', 'venv', 'out', 'bin', 'obj',
+]);
 
 function parseSemver(raw) {
   if (!raw || typeof raw !== 'string') return null;
@@ -32,6 +38,15 @@ function isPinnedBelow(spec, fixedStr) {
   return cmpSemver(v, fixed) < 0;
 }
 
+function matchesAdvisory(spec, adv) {
+  if (!isPinnedBelow(spec, adv.below)) return false;
+  if (typeof adv.isAffected === 'function') {
+    const v = parseSemver(spec);
+    return Boolean(v && adv.isAffected(v));
+  }
+  return true;
+}
+
 const NPM_ADVISORIES = [
   { pkg: 'vm2', below: '999.0.0', severity: 'critical', cwe: 'CWE-94', id: 'dep-npm-vm2-sandbox-escape', title: 'vm2 has unpatched critical sandbox escape CVEs (CVE-2023-37466)', hint: 'Replace vm2 with isolated-vm or Node worker_threads / OS-level sandboxing.' },
   { pkg: 'node-ipc', below: '999.0.0', severity: 'critical', cwe: 'CWE-506', id: 'dep-npm-node-ipc-supply-chain', title: 'node-ipc has documented supply-chain sabotage history', hint: 'Remove node-ipc or replace with standard Node net/ipc primitives.' },
@@ -41,7 +56,16 @@ const NPM_ADVISORIES = [
   { pkg: 'express', below: '4.19.2', severity: 'medium', cwe: 'CWE-601', id: 'dep-npm-express-cve', title: 'express < 4.19.2 is vulnerable to open redirect via malformed URLs', hint: 'Upgrade express to >= 4.19.2.' },
   { pkg: 'minimist', below: '1.2.6', severity: 'high', cwe: 'CWE-1321', id: 'dep-npm-minimist-cve', title: 'minimist < 1.2.6 is vulnerable to Prototype Pollution', hint: 'Upgrade minimist to >= 1.2.6.' },
   { pkg: 'qs', below: '6.10.3', severity: 'high', cwe: 'CWE-1321', id: 'dep-npm-qs-cve', title: 'qs < 6.10.3 is vulnerable to Prototype Pollution', hint: 'Upgrade qs to >= 6.10.3.' },
-  { pkg: 'semver', below: '7.5.2', severity: 'medium', cwe: 'CWE-1333', id: 'dep-npm-semver-redos', title: 'semver < 7.5.2 is vulnerable to Regular Expression DoS (ReDoS)', hint: 'Upgrade semver to >= 7.5.2.' },
+  {
+    pkg: 'semver',
+    below: '7.5.2',
+    isAffected: ([maj, min, pat]) => (maj < 5) || (maj === 5 && (min < 7 || (min === 7 && pat < 2))) || (maj === 6 && (min < 3 || (min === 3 && pat < 1))) || (maj === 7 && (min < 5 || (min === 5 && pat < 2))),
+    severity: 'medium',
+    cwe: 'CWE-1333',
+    id: 'dep-npm-semver-redos',
+    title: 'semver < 5.7.2 / 6.3.1 / 7.5.2 is vulnerable to Regular Expression DoS (ReDoS)',
+    hint: 'Upgrade semver to >= 7.5.2 (or >= 6.3.1 / >= 5.7.2).',
+  },
   { pkg: 'serialize-javascript', below: '3.1.0', severity: 'high', cwe: 'CWE-94', id: 'dep-npm-serialize-js-cve', title: 'serialize-javascript < 3.1.0 allows arbitrary code execution via RegExp', hint: 'Upgrade serialize-javascript to >= 3.1.0.' },
   { pkg: 'tar', below: '6.2.1', severity: 'high', cwe: 'CWE-22', id: 'dep-npm-tar-traversal', title: 'node-tar < 6.2.1 is vulnerable to arbitrary file overwrite / path traversal', hint: 'Upgrade tar to >= 6.2.1.' },
   { pkg: 'ws', below: '8.17.1', severity: 'medium', cwe: 'CWE-400', id: 'dep-npm-ws-dos', title: 'ws < 8.17.1 is vulnerable to DoS when handling excessive HTTP headers', hint: 'Upgrade ws to >= 8.17.1.' },
@@ -65,6 +89,12 @@ const GO_ADVISORIES = [
   { pkg: 'golang.org/x/crypto', below: '0.17.0', severity: 'high', cwe: 'CWE-287', id: 'dep-go-xcrypto-cve', title: 'golang.org/x/crypto < v0.17.0 has SSH Terrapin prefix truncation CVE', hint: 'Upgrade golang.org/x/crypto to >= v0.17.0.' },
   { pkg: 'golang.org/x/net', below: '0.23.0', severity: 'high', cwe: 'CWE-400', id: 'dep-go-xnet-cve', title: 'golang.org/x/net < v0.23.0 has HTTP/2 Rapid Reset / CONTINUATION flood CVEs', hint: 'Upgrade golang.org/x/net to >= v0.23.0.' },
   { pkg: 'github.com/gin-gonic/gin', below: '1.9.1', severity: 'medium', cwe: 'CWE-20', id: 'dep-go-gin-cve', title: 'gin < v1.9.1 has X-Forwarded-For / route trust CVEs', hint: 'Upgrade github.com/gin-gonic/gin to >= v1.9.1.' },
+];
+
+const RUST_ADVISORIES = [
+  { pkg: 'openssl', below: '0.10.55', severity: 'high', cwe: 'CWE-327', id: 'dep-rust-openssl-cve', title: 'openssl crate < 0.10.55 has X.509 / memory-safety CVEs', hint: 'Upgrade openssl crate to >= 0.10.55.' },
+  { pkg: 'hyper', below: '0.14.28', severity: 'high', cwe: 'CWE-400', id: 'dep-rust-hyper-cve', title: 'hyper < 0.14.28 is vulnerable to HTTP/2 Rapid Reset DoS', hint: 'Upgrade hyper to >= 0.14.28 or 1.x.' },
+  { pkg: 'regex', below: '1.5.5', severity: 'high', cwe: 'CWE-400', id: 'dep-rust-regex-cve', title: 'regex crate < 1.5.5 is vulnerable to untrusted regex compilation DoS', hint: 'Upgrade regex crate to >= 1.5.5.' },
 ];
 
 function findLine(text, needle) {
@@ -99,68 +129,120 @@ async function readOptionalFile(filePath) {
   }
 }
 
+async function findManifests(scanRoot) {
+  const manifests = [];
+  const targets = new Set(['package.json', 'package-lock.json', 'requirements.txt', 'go.mod', 'Cargo.lock']);
+  const queue = [scanRoot];
+  let visited = 0;
+
+  while (queue.length && visited < 4000) {
+    const dir = queue.pop();
+    let entries;
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      if (err) continue;
+      continue;
+    }
+    for (const entry of entries) {
+      visited++;
+      if (visited >= 4000) break;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!SKIP_DIRS.has(entry.name.toLowerCase())) queue.push(full);
+      } else if (entry.isFile() && targets.has(entry.name)) {
+        manifests.push({ full, rel: path.relative(scanRoot, full), name: entry.name });
+      }
+    }
+  }
+  return manifests;
+}
+
 async function auditDependencies(scanRoot) {
   const findings = [];
+  const seen = new Set();
+  const manifests = await findManifests(scanRoot);
 
-  // 1. package.json
-  const pkgRaw = await readOptionalFile(path.join(scanRoot, 'package.json'));
-  if (pkgRaw) {
-    let pkg = null;
-    try {
-      pkg = JSON.parse(pkgRaw);
-    } catch (err) {
-      if (err) pkg = null;
-    }
-    if (pkg && typeof pkg === 'object') {
-      const sections = [pkg.dependencies, pkg.devDependencies, pkg.optionalDependencies];
-      for (const deps of sections) {
+  const emit = (finding) => {
+    const key = `${path.dirname(finding.file)}:${finding.ruleId}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    findings.push(finding);
+  };
+
+  for (const { full, rel, name } of manifests) {
+    const raw = await readOptionalFile(full);
+    if (!raw) continue;
+
+    if (name === 'package.json') {
+      let pkg = null;
+      try { pkg = JSON.parse(raw); } catch (err) { if (err) pkg = null; }
+      if (!pkg || typeof pkg !== 'object') continue;
+      for (const deps of [pkg.dependencies, pkg.devDependencies, pkg.optionalDependencies]) {
         if (!deps || typeof deps !== 'object') continue;
         for (const adv of NPM_ADVISORIES) {
           const ver = deps[adv.pkg];
-          if (typeof ver === 'string' && isPinnedBelow(ver, adv.below)) {
-            const loc = findLine(pkgRaw, `"${adv.pkg}"`);
-            findings.push(makeDepFinding(adv, 'package.json', loc.line, loc.excerpt, ver));
+          if (typeof ver === 'string' && matchesAdvisory(ver, adv)) {
+            const loc = findLine(raw, `"${adv.pkg}"`);
+            emit(makeDepFinding(adv, rel, loc.line, loc.excerpt, ver));
+          }
+        }
+      }
+    } else if (name === 'package-lock.json') {
+      let lock = null;
+      try { lock = JSON.parse(raw); } catch (err) { if (err) lock = null; }
+      if (!lock || typeof lock !== 'object') continue;
+      const pkgs = lock.packages || {};
+      for (const [pkgPath, meta] of Object.entries(pkgs)) {
+        if (!pkgPath || !meta || typeof meta.version !== 'string') continue;
+        const pkgName = pkgPath.replace(/^.*node_modules\//, '');
+        for (const adv of NPM_ADVISORIES) {
+          if (pkgName === adv.pkg && matchesAdvisory(meta.version, adv)) {
+            const loc = findLine(raw, pkgPath);
+            emit(makeDepFinding(adv, rel, loc.line, `${pkgName}@${meta.version}`, meta.version));
+          }
+        }
+      }
+    } else if (name === 'requirements.txt') {
+      const lines = raw.split(/\r?\n/);
+      lines.forEach((lineText, idx) => {
+        const clean = lineText.split('#')[0].trim();
+        const m = clean.match(/^([A-Za-z0-9_.-]+)\s*(?:={2}|<=|~=|<)\s*([0-9][0-9A-Za-z.]*)/);
+        if (!m) return;
+        const pkgName = m[1].toLowerCase().replace(/_/g, '-');
+        const ver = m[2];
+        for (const adv of PY_ADVISORIES) {
+          if (pkgName === adv.pkg && isPinnedBelow(ver, adv.below)) {
+            emit(makeDepFinding(adv, rel, idx + 1, lineText.trim(), ver));
+          }
+        }
+      });
+    } else if (name === 'go.mod') {
+      const lines = raw.split(/\r?\n/);
+      lines.forEach((lineText, idx) => {
+        const clean = lineText.split('//')[0].trim();
+        const m = clean.match(/^(?:require\s+)?([^\s]+)\s+(v[0-9]+\.[0-9]+\.[0-9]+[^\s]*)/);
+        if (!m) return;
+        for (const adv of GO_ADVISORIES) {
+          if (m[1] === adv.pkg && isPinnedBelow(m[2], adv.below)) {
+            emit(makeDepFinding(adv, rel, idx + 1, lineText.trim(), m[2]));
+          }
+        }
+      });
+    } else if (name === 'Cargo.lock') {
+      const pkgBlocks = raw.split(/\[\[package\]\]/);
+      for (const block of pkgBlocks) {
+        const nameMatch = block.match(/name\s*=\s*"([^"]+)"/);
+        const verMatch = block.match(/version\s*=\s*"([^"]+)"/);
+        if (!nameMatch || !verMatch) continue;
+        for (const adv of RUST_ADVISORIES) {
+          if (nameMatch[1] === adv.pkg && isPinnedBelow(verMatch[1], adv.below)) {
+            const loc = findLine(raw, `name = "${adv.pkg}"`);
+            emit(makeDepFinding(adv, rel, loc.line, `${adv.pkg} = "${verMatch[1]}"`, verMatch[1]));
           }
         }
       }
     }
-  }
-
-  // 2. requirements.txt
-  const reqRaw = await readOptionalFile(path.join(scanRoot, 'requirements.txt'));
-  if (reqRaw) {
-    const lines = reqRaw.split(/\r?\n/);
-    lines.forEach((lineText, idx) => {
-      const clean = lineText.split('#')[0].trim();
-      if (!clean) return;
-      const m = clean.match(/^([A-Za-z0-9_.-]+)\s*(?:={2}|<=|~=|<)\s*([0-9][0-9A-Za-z.]*)/);
-      if (!m) return;
-      const pkgName = m[1].toLowerCase().replace(/_/g, '-');
-      const ver = m[2];
-      for (const adv of PY_ADVISORIES) {
-        if (pkgName === adv.pkg && isPinnedBelow(ver, adv.below)) {
-          findings.push(makeDepFinding(adv, 'requirements.txt', idx + 1, lineText.trim(), ver));
-        }
-      }
-    });
-  }
-
-  // 3. go.mod
-  const goModRaw = await readOptionalFile(path.join(scanRoot, 'go.mod'));
-  if (goModRaw) {
-    const lines = goModRaw.split(/\r?\n/);
-    lines.forEach((lineText, idx) => {
-      const clean = lineText.split('//')[0].trim();
-      const m = clean.match(/^(?:require\s+)?([^\s]+)\s+(v[0-9]+\.[0-9]+\.[0-9]+[^\s]*)/);
-      if (!m) return;
-      const pkgName = m[1];
-      const ver = m[2];
-      for (const adv of GO_ADVISORIES) {
-        if (pkgName === adv.pkg && isPinnedBelow(ver, adv.below)) {
-          findings.push(makeDepFinding(adv, 'go.mod', idx + 1, lineText.trim(), ver));
-        }
-      }
-    });
   }
 
   return findings;
