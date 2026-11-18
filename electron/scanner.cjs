@@ -76,8 +76,8 @@ function isExtensionlessSource(name) {
   return extensionlessSources.has(name.toLowerCase()) || /^\.env(?:\..+)?$/i.test(name);
 }
 
-const PLACEHOLDER = /^(?:example|sample|changeme|change-me|your[-_].*|placeholder|dummy|fake|xxxx+|<.*>|\$\{.*\}|process\.env.*|os\.environ.*|password|passwd|secret|token|abc123|foo|bar|none|null|(?:export|reset|test|mock|demo|ephemeral)[-_].*)$/i;
-const TEST_FILE_PATH = /(?:^|[\\/])(?:tests?|__tests__|spec)[\\/]|(?:\.test|\.spec)\.[cm]?[jt]sx?$/i;
+const PLACEHOLDER = /^(?:example|sample|changeme|change-me|your[-_].*|placeholder|dummy|fake|xxxx+|<.*>|\$\{.*\}|process\.env.*|os\.environ.*|password|passwd|secret|token|abc123|foo|bar|none|null|(?:export|reset|test|mock|demo|ephemeral|synthetic|rehearsal)[-_].*)$/i;
+const TEST_FILE_PATH = /(?:^|[\\/])(?:tests?|__tests__|specs?|fixtures?|__fixtures__|examples?|docs?|samples?|demos?|benchmarks?)[\\/]|(?:^|[\\/])test_[^\\/]+\.py$|_(?:test\.py|test\.go)$|(?:\.test|\.spec)\.[cm]?[jt]sx?$|\.t\.sol$/i;
 
 function looksLikePlaceholder(value) {
   if (PLACEHOLDER.test(value) || /^\*+$/.test(value) || /\.\.\.$/.test(value) || /(?:^|[-_])(?:test|mock|dummy|fake|example)(?:[-_]|$)/i.test(value)) return true;
@@ -289,6 +289,36 @@ function dedupeFindings(findings) {
     seen.add(key);
     return true;
   });
+}
+
+function dedupeByCweLocation(findings) {
+  const sevRank = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
+  const bestByCweLoc = new Map();
+  const ordered = [];
+  for (const finding of findings) {
+    const ext = path.extname(finding.file || '').toLowerCase();
+    if ((finding.ruleId?.startsWith('c-') || finding.ruleId?.startsWith('cpp-')) && !['.c', '.h', '.cc', '.cpp', '.hpp', '.cxx'].includes(ext)) {
+      continue;
+    }
+    if (finding.cwe) {
+      const cweKey = `${finding.file}:${finding.line}:${finding.cwe}`;
+      const existingIdx = bestByCweLoc.get(cweKey);
+      if (existingIdx !== undefined) {
+        const existing = ordered[existingIdx];
+        const curRank = sevRank[finding.severity] || 0;
+        const oldRank = sevRank[existing.severity] || 0;
+        const curIsAst = /^(?:js-|type-|cfg-|py-|go-|sol-|polyglot-)/.test(finding.ruleId);
+        const oldIsAst = /^(?:js-|type-|cfg-|py-|go-|sol-|polyglot-)/.test(existing.ruleId);
+        if (curRank > oldRank || (curRank === oldRank && curIsAst && !oldIsAst)) {
+          ordered[existingIdx] = finding;
+        }
+        continue;
+      }
+      bestByCweLoc.set(cweKey, ordered.length);
+    }
+    ordered.push(finding);
+  }
+  return ordered;
 }
 
 function rulesForKind(kind) {
@@ -636,7 +666,7 @@ function scanFileContent(raw, rel, extName, lang, catalog, applicableByLang) {
 
   for (const rule of applicable) {
     if (rule.id === 'secret-generic-credential' && TEST_FILE_PATH.test(rel)) continue;
-    if (isScriptOrTest && (rule.id === 'js-console-log' || rule.id === 'js-sync-io')) continue;
+    if (isScriptOrTest && ['js-console-log', 'js-sync-io', 'py-debug-true', 'exp-py-flask-render-string', 'py-flask-render-template-string', 'js-dynamic-require'].includes(rule.id)) continue;
     if (rule.absent && rule.absent.test(raw)) continue;
     let ruleHitsInFile = 0;
     const isCodeView = rule.view === 'code';
@@ -857,11 +887,17 @@ async function scanProjectRoot(root, kind, options = {}) {
     'css-important', 'css-transition-all', 'css-fixed-height', 'css-user-select-none',
     'js-console-log', 'js-todo', 'js-commented-code', 'js-loose-equality', 'js-missing-strict',
     'js-v' + 'ar', 'py-print', 'py-todo', 'ml-print-progress', 'lib-console-log-noise',
-    'exp-logic-return-await-redundancy', 'exp-js-isNaN-global', 'exp-js-parseint-no-radix',
-    'html-no-csp', 'html-noscript', 'polyglot-syntax-error', 'js-undeclared-var',
+    'exp-logic-return-await-redundancy', 'exp-js-isNaN-global', 'exp-js-isFinite-global',
+    'exp-js-parseint-no-radix', 'js-loose-inequality-null',
+    'html-no-csp', 'html-noscript', 'html-input-no-type', 'html-label-no-for',
+    'html-button-no-type', 'html-empty-href', 'py-wildcard-import',
+    'lib-no-entry', 'lib-no-files-allowlist',
+    'polyglot-syntax-error', 'js-undeclared-var',
     'js-promise-no-catch', 'js-fixme', 'js-disabled-test', 'exp-logic-addeventlistener-anon',
   ]);
-  const filteredFindings = options.bugsOnly ? uniqueFindings.filter((f) => !styleHintRules.has(f.ruleId)) : uniqueFindings;
+  const filteredFindings = options.bugsOnly
+    ? dedupeByCweLocation(uniqueFindings.filter((f) => !styleHintRules.has(f.ruleId)))
+    : uniqueFindings;
   const selected = options.maxFindings ? filteredFindings.slice(0, options.maxFindings) : filteredFindings;
   const capped = selected.slice(0, MAX_FINDINGS);
   const severityCounts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
