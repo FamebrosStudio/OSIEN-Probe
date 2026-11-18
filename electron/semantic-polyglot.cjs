@@ -1,8 +1,24 @@
 'use strict';
 
 // Semantic security analyzers for Solidity (.sol), Python (.py), and Go (.go):
-//  - Solidity Checks-Effects-Interactions (reentrancy) & unprotected sensitive functions
-//  - Python & Go intraprocedural AND cross-file request-input taint into SQL / shell sinks
+//  - Solidity Checks-Effects-Interactions (reentrancy), unprotected init/delegatecall, tx.origin, unchecked call
+//  - Python & Go AST-backed intraprocedural AND cross-file request-input taint into SQL / shell sinks
+
+let astGrep = null;
+function getAstGrep() {
+  if (astGrep !== null) return astGrep;
+  try {
+    const { parse, registerDynamicLanguage } = require('@ast-grep/napi');
+    registerDynamicLanguage({
+      python: require('@ast-grep/lang-python'),
+      go: require('@ast-grep/lang-go'),
+    });
+    astGrep = { parse };
+  } catch {
+    astGrep = false;
+  }
+  return astGrep;
+}
 
 function buildFinding(rel, line, id, title, severity, cwe, hint, reason, excerpt) {
   return {
@@ -93,42 +109,118 @@ function analyzeSolidity(raw, rel) {
         ));
       }
     }
+    if (/\btx\.origin\s*={2}/.test(body)) {
+      const txOffset = bodyStart + body.search(/\btx\.origin\s*={2}/);
+      const txLine = raw.slice(0, txOffset).split(/\r?\n/).length;
+      findings.push(buildFinding(
+        rel, txLine, 'sol-tx-origin-auth',
+        `Authorization in "${fnName}()" uses tx.origin`,
+        'high', 'CWE-477',
+        'Use msg.sender instead of tx.origin for authorization checks to prevent phishing attacks.',
+        `Function "${fnName}" checks tx.origin == ... for access control.`,
+        lines[txLine - 1],
+      ));
+    }
+
+    const lowLevelCall = /\.(?:call|delegatecall|send)\s*(?:\{[^}]*\})?\s*\([^;]*\)\s*;/.exec(body);
+    if (lowLevelCall) {
+      const callLine = raw.slice(0, bodyStart + lowLevelCall.index).split(/\r?\n/).length;
+      const lineText = lines[callLine - 1] || '';
+      if (!/=\s*[^=]|\brequire\s*\(|\bif\s*\(/.test(lineText)) {
+        findings.push(buildFinding(
+          rel, callLine, 'sol-unchecked-call',
+          `Unchecked low-level call return value in "${fnName}()"`,
+          'high', 'CWE-252',
+          'Capture `(bool ok, ) = target.call(...)` and `require(ok)` so silent failures do not corrupt contract state.',
+          `Low-level call/send return value is ignored in "${fnName}".`,
+          lineText,
+        ));
+      }
+    }
   }
 
   return findings;
 }
 
 const PY_SOURCE_RE = /\b(?:request\.(?:args|form|json|data|values|get_json)|input\s*\(|sys\.argv)/;
+const PY_SANITIZER_RE = /\b(?:int|float|bool|shlex\.quote|html\.escape|markupsafe\.escape)\s*\(/;
 const PY_SINK_RE = /\b(?:cursor\.execute|os\.system|subprocess\.(?:run|Popen|call)\s*\(|eval\s*\(|exec\s*\()/;
 
 function analyzePythonTaint(raw, rel) {
   const findings = [];
   const lines = raw.split(/\r?\n/);
-  const tainted = new Set();
+  const ag = getAstGrep();
 
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    if (/^(?:async\s+)?def\s+/.test(trimmed)) { tainted.clear(); continue; }
-
-    const assign = trimmed.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
-    if (assign) {
-      const [, lhs, rhs] = assign;
-      if (PY_SOURCE_RE.test(rhs) || [...tainted].some((v) => new RegExp(`\\b${v}\\b`).test(rhs))) tainted.add(lhs);
-      else tainted.delete(lhs);
+  // AST-backed function-level taint if @ast-grep/napi is available
+  if (ag) {
+    try {
+      const root = ag.parse('python', raw).root();
+      const fns = root.findAll({ rule: { kind: 'function_definition' } });
+      for (const fn of fns) {
+        const tainted = new Set();
+        const stmts = fn.findAll({ rule: { kind: 'assignment' } });
+        for (const st of stmts) {
+          const text = st.text();
+          const eq = text.indexOf('=');
+          if (eq < 0) continue;
+          const lhs = text.slice(0, eq).trim().split(/[\s,]+/)[0];
+          const rhs = text.slice(eq + 1);
+          if (!/^[A-Za-z_]\w*$/.test(lhs)) continue;
+          if (PY_SANITIZER_RE.test(rhs)) { tainted.delete(lhs); continue; }
+          if (PY_SOURCE_RE.test(rhs) || [...tainted].some((v) => new RegExp(`\\b${v}\\b`).test(rhs))) tainted.add(lhs);
+          else tainted.delete(lhs);
+        }
+        const calls = fn.findAll({ rule: { kind: 'call' } });
+        for (const call of calls) {
+          const cText = call.text();
+          if (!PY_SINK_RE.test(cText)) continue;
+          if (PY_SANITIZER_RE.test(cText)) continue;
+          const usesTainted = PY_SOURCE_RE.test(cText) || [...tainted].some((v) => new RegExp(`\\b${v}\\b`).test(cText));
+          if (usesTainted && (!/\bsubprocess\./.test(cText) || /\bshell\s*=\s*True\b/.test(cText))) {
+            const line = call.range().start.line + 1;
+            findings.push(buildFinding(
+              rel, line, 'py-taint-sink',
+              'User-controlled input reaches dangerous Python execution/SQL sink',
+              'high', 'CWE-89',
+              'Use parameterized SQL queries or argument arrays (shell=False) instead of passing tainted input.',
+              'AST taint analysis confirms request/input variable flows into a dangerous sink.',
+              lines[line - 1] || cText,
+            ));
+          }
+        }
+      }
+    } catch {
+      // Fall through to line analyzer on unexpected parse error
     }
+  }
 
-    if (PY_SINK_RE.test(trimmed)) {
-      const usesTainted = PY_SOURCE_RE.test(trimmed) || [...tainted].some((v) => new RegExp(`\\b${v}\\b`).test(trimmed));
-      if (usesTainted && (!/\bsubprocess\./.test(trimmed) || /\bshell\s*=\s*True\b/.test(trimmed))) {
-        findings.push(buildFinding(
-          rel, i + 1, 'py-taint-sink',
-          'User-controlled input reaches dangerous Python execution/SQL sink',
-          'high', 'CWE-89',
-          'Use parameterized SQL queries or argument arrays (shell=False) instead of passing tainted input.',
-          'Tainted request/input variable flows into a dangerous sink in the same function.',
-          trimmed,
-        ));
+  if (findings.length === 0) {
+    const tainted = new Set();
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      if (/^(?:async\s+)?def\s+/.test(trimmed)) { tainted.clear(); continue; }
+
+      const assign = trimmed.match(/^([A-Za-z_]\w*)\s*=\s*(.+)$/);
+      if (assign) {
+        const [, lhs, rhs] = assign;
+        if (PY_SANITIZER_RE.test(rhs)) tainted.delete(lhs);
+        else if (PY_SOURCE_RE.test(rhs) || [...tainted].some((v) => new RegExp(`\\b${v}\\b`).test(rhs))) tainted.add(lhs);
+        else tainted.delete(lhs);
+      }
+
+      if (PY_SINK_RE.test(trimmed) && !PY_SANITIZER_RE.test(trimmed)) {
+        const usesTainted = PY_SOURCE_RE.test(trimmed) || [...tainted].some((v) => new RegExp(`\\b${v}\\b`).test(trimmed));
+        if (usesTainted && (!/\bsubprocess\./.test(trimmed) || /\bshell\s*=\s*True\b/.test(trimmed))) {
+          findings.push(buildFinding(
+            rel, i + 1, 'py-taint-sink',
+            'User-controlled input reaches dangerous Python execution/SQL sink',
+            'high', 'CWE-89',
+            'Use parameterized SQL queries or argument arrays (shell=False) instead of passing tainted input.',
+            'Tainted request/input variable flows into a dangerous sink in the same function.',
+            trimmed,
+          ));
+        }
       }
     }
   }
@@ -157,6 +249,7 @@ function analyzePythonTaint(raw, rel) {
 }
 
 const GO_SOURCE_RE = /\b(?:r\.URL\.Query\s*\(|r\.FormValue\s*\(|c\.(?:Query|Param|PostForm)\s*\()/;
+const GO_SANITIZER_RE = /\b(?:strconv\.(?:Atoi|ParseInt|ParseFloat)|filepath\.Base)\s*\(/;
 const GO_SINK_RE = /\b(?:db\.(?:Query|Exec|QueryRow)\s*\(|exec\.Command\s*\(\s*"(?:sh|bash)"\s*,\s*"-c")/;
 
 function analyzeGoTaint(raw, rel) {
@@ -172,10 +265,11 @@ function analyzeGoTaint(raw, rel) {
     const assign = trimmed.match(/^([A-Za-z_]\w*)(?:\s*,\s*[A-Za-z_]\w*)?\s*:?=\s*(.+)$/);
     if (assign) {
       const [, lhs, rhs] = assign;
-      if (GO_SOURCE_RE.test(rhs) || [...tainted].some((v) => new RegExp(`\\b${v}\\b`).test(rhs))) tainted.add(lhs);
+      if (GO_SANITIZER_RE.test(rhs)) tainted.delete(lhs);
+      else if (GO_SOURCE_RE.test(rhs) || [...tainted].some((v) => new RegExp(`\\b${v}\\b`).test(rhs))) tainted.add(lhs);
     }
 
-    if (GO_SINK_RE.test(trimmed)) {
+    if (GO_SINK_RE.test(trimmed) && !GO_SANITIZER_RE.test(trimmed)) {
       const usesTainted = GO_SOURCE_RE.test(trimmed) || [...tainted].some((v) => new RegExp(`\\b${v}\\b`).test(trimmed));
       const hasConcatOrFmt = /[+]|fmt\.Sprintf\s*\(/.test(trimmed) || [...tainted].some((v) => new RegExp(`\\b${v}\\b`).test(trimmed));
       if (usesTainted && hasConcatOrFmt) {

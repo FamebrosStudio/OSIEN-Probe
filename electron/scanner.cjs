@@ -9,6 +9,7 @@ const path = require('node:path');
 const fs = require('node:fs/promises');
 const { analyzeJavaScriptAst } = require('./js-analyzer.cjs');
 const { analyzeCrossFileProject } = require('./cross-file-analyzer.cjs');
+const { analyzeTypeAndCfgProject } = require('./type-cfg-analyzer.cjs');
 const { analyzePolyglot, languageByExtension } = require('./polyglot.cjs');
 const { analyzeSemanticPolyglot, analyzeCrossFilePolyglot } = require('./semantic-polyglot.cjs');
 const { auditDependencies } = require('./dependency-auditor.cjs');
@@ -811,6 +812,20 @@ async function scanProjectRoot(root, kind, options = {}) {
       findings.push(finding);
       if (findings.length >= MAX_FINDINGS) { truncated = true; break; }
     }
+    if (!truncated) {
+      const typeCfg = analyzeTypeAndCfgProject(jsFiles, { makeFinding, parseSuppressions: suppressionMap, isSuppressed: suppressed }, scanRoot);
+      if (typeCfg.suppressRegexIds && typeCfg.suppressRegexIds.size > 0) {
+        for (let i = findings.length - 1; i >= 0; i--) {
+          const f = findings[i];
+          const suppressedSet = typeCfg.suppressRegexIds.get(`${f.file}:${f.line}`);
+          if (suppressedSet && suppressedSet.has(f.ruleId)) findings.splice(i, 1);
+        }
+      }
+      for (const finding of typeCfg.findings) {
+        findings.push(finding);
+        if (findings.length >= MAX_FINDINGS) { truncated = true; break; }
+      }
+    }
   }
 
   if (!truncated && !options.skipCrossFile && polyglotFiles.length > 1) {
@@ -821,7 +836,11 @@ async function scanProjectRoot(root, kind, options = {}) {
   }
 
   if (!truncated) {
-    const depFindings = await auditDependencies(scanRoot);
+    const depFindings = await auditDependencies(scanRoot, {
+      sourceFiles: [...jsFiles, ...polyglotFiles],
+      syncOsv: Boolean(options.syncOsv),
+      osvCachePath: options.osvCachePath,
+    });
     for (const finding of depFindings) {
       findings.push(finding);
       if (findings.length >= MAX_FINDINGS) { truncated = true; break; }

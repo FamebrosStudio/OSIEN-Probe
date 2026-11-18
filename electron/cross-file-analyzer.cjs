@@ -363,6 +363,30 @@ async function analyzeCrossFileProject(jsFiles, helpers, scanRoot = '') {
 
     // 2b. Express/Fastify route missing auth middleware + backend API route body keys.
     checksRun++;
+    // Collect router-level / app-level auth middleware & webhook HMAC checks
+    const fileRouterUseAuth = [];
+    const globalAuthPrefixes = [];
+    const WEBHOOK_SIG_RE = /(?:createHmac|timingSafeEqual|verifySignature|x-hub-signature|stripe-signature|svix-signature|webhook.*secret)/i;
+
+    for (const other of parsedFiles.values()) {
+      walk(other.ast, (n) => {
+        if (n.type !== 'CallExpression') return;
+        const cal = n.callee;
+        if (cal?.type === 'MemberExpression' && cal.property?.name === 'use' && ['app', 'router', 'server', 'api'].includes(cal.object?.name)) {
+          const args = n.arguments || [];
+          const firstStr = args[0]?.type === 'StringLiteral' ? args[0].value : null;
+          const restSrc = args.slice(firstStr ? 1 : 0).map((a) => other.entry.raw.slice(a.start, a.end)).join(' ');
+          if (AUTH_MW_RE.test(restSrc)) {
+            if (other.entry.rel === entry.rel) {
+              fileRouterUseAuth.push({ prefix: firstStr || '/', line: n.loc?.start.line || 1 });
+            } else if (firstStr) {
+              globalAuthPrefixes.push(firstStr);
+            }
+          }
+        }
+      });
+    }
+
     const routesInFile = [];
     walk(ast, (node) => {
       if (node.type !== 'CallExpression') return;
@@ -377,10 +401,32 @@ async function analyzeCrossFileProject(jsFiles, helpers, scanRoot = '') {
 
       const middlewares = node.arguments.slice(1, -1).map((a) => raw.slice(a.start, a.end));
       const handler = node.arguments[node.arguments.length - 1];
-      const hasAuth = middlewares.some((m) => AUTH_MW_RE.test(m))
-        || (handler && AUTH_MW_RE.test(raw.slice(handler.start, Math.min(handler.end, handler.start + 300))));
       const line = node.loc?.start.line || 1;
+      const handlerFullSrc = handler ? raw.slice(handler.start, handler.end) : '';
+      const coveredByRouterUse = fileRouterUseAuth.some((u) => u.line < line && routeArg.value.startsWith(u.prefix))
+        || globalAuthPrefixes.some((pfx) => routeArg.value.startsWith(pfx));
+      const hasWebhookSig = WEBHOOK_SIG_RE.test(handlerFullSrc);
+      const hasAuth = coveredByRouterUse
+        || hasWebhookSig
+        || middlewares.some((m) => AUTH_MW_RE.test(m))
+        || (handler && AUTH_MW_RE.test(raw.slice(handler.start, Math.min(handler.end, handler.start + 300))));
       routesInFile.push({ objName, method, routePath: routeArg.value, hasAuth, line, excerpt: lines[line - 1] || '' });
+
+      // Exploit Reachability: unauthenticated route flowing tainted req.* directly into shell/SQL/path sink
+      if (!isTestOrScript && !hasAuth && !PUBLIC_ROUTE_RE.test(routeArg.value) && handler) {
+        const hasReqInput = REQUEST_TAINT_RE.test(handlerFullSrc);
+        const hasDangerousSink = /\b(?:exec|execSync|spawnSync)\s*\(|\.(?:query|raw)\s*\(\s*`[^`]*\$\{|\bfs\.(?:readFile|writeFile|unlink)\s*\(/.test(handlerFullSrc);
+        if (hasReqInput && hasDangerousSink && !SANITIZER_RE.test(handlerFullSrc)) {
+          pushFinding(pf, {
+            id: 'js-reachable-unauth-sink',
+            title: `Reachable unauthenticated sink on ${method.toUpperCase()} ${routeArg.value}`,
+            severity: 'critical',
+            cwe: 'CWE-306',
+            confidence: 'high',
+            hint: 'Add authentication middleware and sanitize/parameterize request input before passing it to the sink.',
+          }, line, lines[line - 1] || '', `Public route ${method.toUpperCase()} ${routeArg.value} has no auth middleware and passes request input toward a high-risk sink.`);
+        }
+      }
 
       if (['post', 'put', 'patch'].includes(method) && handler) {
         const bodyKeys = new Set();

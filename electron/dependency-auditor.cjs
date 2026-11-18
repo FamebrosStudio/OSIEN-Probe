@@ -103,20 +103,80 @@ function findLine(text, needle) {
   return idx >= 0 ? { line: idx + 1, excerpt: lines[idx].trim() } : { line: 1, excerpt: needle };
 }
 
-function makeDepFinding(adv, rel, line, excerpt, declaredVersion) {
+function makeDepFinding(adv, rel, line, excerpt, declaredVersion, reachable = null) {
+  const reachNote = reachable === true
+    ? ' [REACHABLE: imported in project source]'
+    : (reachable === false ? ' [transitive-only: not directly imported]' : '');
   return {
     id: `${rel}:${line}:${adv.id}`,
     ruleId: adv.id,
-    title: `${adv.title} (declared: ${declaredVersion})`,
+    title: `${adv.title} (declared: ${declaredVersion})${reachNote}`,
     severity: adv.severity,
     cwe: adv.cwe,
     hint: adv.hint,
-    confidence: 'high',
-    reason: `Dependency "${adv.pkg}" (${declaredVersion}) falls below patched version ${adv.below}.`,
+    confidence: reachable === false ? 'medium' : 'high',
+    reachable,
+    reason: `Dependency "${adv.pkg}" (${declaredVersion}) falls below patched version ${adv.below}.${reachNote}`,
     file: rel,
     line,
     excerpt: String(excerpt || '').slice(0, 220),
   };
+}
+
+function collectImportedPackages(sourceFiles = []) {
+  const imported = new Set();
+  for (const f of sourceFiles) {
+    const raw = f?.raw || '';
+    for (const m of raw.matchAll(/(?:import\s+[\s\S]*?from\s+|require\s*\(\s*)['"]([^'"./][^'"]*)['"]/g)) {
+      const spec = m[1];
+      const pkg = spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0];
+      imported.add(pkg);
+    }
+    for (const m of raw.matchAll(/^\s*(?:import|from)\s+([A-Za-z0-9_.-]+)/gm)) {
+      imported.add(m[1].split('.')[0].toLowerCase().replace(/_/g, '-'));
+    }
+    for (const m of raw.matchAll(/^\s*"([^"\s]+\/[^"\s]+)"/gm)) {
+      imported.add(m[1]);
+    }
+  }
+  return imported;
+}
+
+async function queryOsvBatch(queries, cachePath) {
+  const cached = cachePath ? await readOptionalFile(cachePath) : null;
+  let cacheObj = {};
+  if (cached) {
+    try { cacheObj = JSON.parse(cached); } catch { cacheObj = {}; }
+  }
+  if (!queries.length || typeof fetch !== 'function') return cacheObj;
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 4000);
+    const res = await fetch('https://api.osv.dev/v1/querybatch', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ queries: queries.slice(0, 100) }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return cacheObj;
+    const data = await res.json();
+    const results = Array.isArray(data?.results) ? data.results : [];
+    for (let i = 0; i < results.length; i++) {
+      const q = queries[i];
+      const vulns = Array.isArray(results[i]?.vulns) ? results[i].vulns : [];
+      if (q && vulns.length > 0) {
+        const key = `${q.package.ecosystem}:${q.package.name}@${q.version}`;
+        cacheObj[key] = vulns.map((v) => ({ id: v.id, summary: v.summary || v.id }));
+      }
+    }
+    if (cachePath) {
+      await fs.writeFile(cachePath, JSON.stringify(cacheObj, null, 2), 'utf8').catch((err) => { void err; });
+    }
+  } catch {
+    // Offline or timeout: gracefully use cached + built-in advisories
+  }
+  return cacheObj;
 }
 
 async function readOptionalFile(filePath) {
@@ -131,7 +191,10 @@ async function readOptionalFile(filePath) {
 
 async function findManifests(scanRoot) {
   const manifests = [];
-  const targets = new Set(['package.json', 'package-lock.json', 'requirements.txt', 'go.mod', 'Cargo.lock']);
+  const targets = new Set([
+    'package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock',
+    'requirements.txt', 'poetry.lock', 'go.mod', 'go.sum', 'Cargo.lock',
+  ]);
   const queue = [scanRoot];
   let visited = 0;
 
@@ -158,10 +221,16 @@ async function findManifests(scanRoot) {
   return manifests;
 }
 
-async function auditDependencies(scanRoot) {
+async function auditDependencies(scanRoot, options = {}) {
   const findings = [];
   const seen = new Set();
   const manifests = await findManifests(scanRoot);
+  const imported = Array.isArray(options.sourceFiles) && options.sourceFiles.length > 0
+    ? collectImportedPackages(options.sourceFiles)
+    : null;
+  const reachOf = (pkgName) => (imported ? imported.has(pkgName) : null);
+  const osvQueries = [];
+  const extractedPkgs = [];
 
   const emit = (finding) => {
     const key = `${path.dirname(finding.file)}:${finding.ruleId}`;
@@ -180,11 +249,19 @@ async function auditDependencies(scanRoot) {
       if (!pkg || typeof pkg !== 'object') continue;
       for (const deps of [pkg.dependencies, pkg.devDependencies, pkg.optionalDependencies]) {
         if (!deps || typeof deps !== 'object') continue;
+        for (const [depName, ver] of Object.entries(deps)) {
+          if (typeof ver !== 'string') continue;
+          const cleanV = ver.replace(/^[v^~=<>!\s]+/, '').split(' ')[0];
+          if (/^\d+\.\d+\.\d+/.test(cleanV)) {
+            osvQueries.push({ package: { ecosystem: 'npm', name: depName }, version: cleanV });
+            extractedPkgs.push({ ecosystem: 'npm', name: depName, version: cleanV, rel, line: findLine(raw, `"${depName}"`).line });
+          }
+        }
         for (const adv of NPM_ADVISORIES) {
           const ver = deps[adv.pkg];
           if (typeof ver === 'string' && matchesAdvisory(ver, adv)) {
             const loc = findLine(raw, `"${adv.pkg}"`);
-            emit(makeDepFinding(adv, rel, loc.line, loc.excerpt, ver));
+            emit(makeDepFinding(adv, rel, loc.line, loc.excerpt, ver, reachOf(adv.pkg)));
           }
         }
       }
@@ -199,7 +276,34 @@ async function auditDependencies(scanRoot) {
         for (const adv of NPM_ADVISORIES) {
           if (pkgName === adv.pkg && matchesAdvisory(meta.version, adv)) {
             const loc = findLine(raw, pkgPath);
-            emit(makeDepFinding(adv, rel, loc.line, `${pkgName}@${meta.version}`, meta.version));
+            emit(makeDepFinding(adv, rel, loc.line, `${pkgName}@${meta.version}`, meta.version, reachOf(pkgName)));
+          }
+        }
+      }
+    } else if (name === 'pnpm-lock.yaml') {
+      const lines = raw.split(/\r?\n/);
+      lines.forEach((lineText, idx) => {
+        const m = lineText.match(/^\s*['"]?\/?(@?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?)@([0-9]+\.[0-9]+\.[0-9]+[^('":\s]*)/);
+        if (!m) return;
+        const [, pkgName, ver] = m;
+        for (const adv of NPM_ADVISORIES) {
+          if (pkgName === adv.pkg && matchesAdvisory(ver, adv)) {
+            emit(makeDepFinding(adv, rel, idx + 1, `${pkgName}@${ver}`, ver, reachOf(pkgName)));
+          }
+        }
+      });
+    } else if (name === 'yarn.lock') {
+      const blocks = raw.split(/\r?\n\r?\n/);
+      for (const block of blocks) {
+        const hdr = block.match(/^['"]?(@?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?)@[^:\n]+:/m);
+        const verM = block.match(/^\s+version\s+['"]?([0-9]+\.[0-9]+\.[0-9]+[^'"\s]*)/m);
+        if (!hdr || !verM) continue;
+        const pkgName = hdr[1];
+        const ver = verM[1];
+        for (const adv of NPM_ADVISORIES) {
+          if (pkgName === adv.pkg && matchesAdvisory(ver, adv)) {
+            const loc = findLine(raw, pkgName);
+            emit(makeDepFinding(adv, rel, loc.line, `${pkgName}@${ver}`, ver, reachOf(pkgName)));
           }
         }
       }
@@ -211,21 +315,38 @@ async function auditDependencies(scanRoot) {
         if (!m) return;
         const pkgName = m[1].toLowerCase().replace(/_/g, '-');
         const ver = m[2];
+        osvQueries.push({ package: { ecosystem: 'PyPI', name: pkgName }, version: ver });
+        extractedPkgs.push({ ecosystem: 'PyPI', name: pkgName, version: ver, rel, line: idx + 1 });
         for (const adv of PY_ADVISORIES) {
           if (pkgName === adv.pkg && isPinnedBelow(ver, adv.below)) {
-            emit(makeDepFinding(adv, rel, idx + 1, lineText.trim(), ver));
+            emit(makeDepFinding(adv, rel, idx + 1, lineText.trim(), ver, reachOf(pkgName)));
           }
         }
       });
-    } else if (name === 'go.mod') {
+    } else if (name === 'poetry.lock') {
+      const pkgBlocks = raw.split(/\[\[package\]\]/);
+      for (const block of pkgBlocks) {
+        const nameMatch = block.match(/name\s*=\s*"([^"]+)"/);
+        const verMatch = block.match(/version\s*=\s*"([^"]+)"/);
+        if (!nameMatch || !verMatch) continue;
+        const pkgName = nameMatch[1].toLowerCase().replace(/_/g, '-');
+        const ver = verMatch[1];
+        for (const adv of PY_ADVISORIES) {
+          if (pkgName === adv.pkg && isPinnedBelow(ver, adv.below)) {
+            const loc = findLine(raw, `name = "${nameMatch[1]}"`);
+            emit(makeDepFinding(adv, rel, loc.line, `${pkgName}==${ver}`, ver, reachOf(pkgName)));
+          }
+        }
+      }
+    } else if (name === 'go.mod' || name === 'go.sum') {
       const lines = raw.split(/\r?\n/);
       lines.forEach((lineText, idx) => {
         const clean = lineText.split('//')[0].trim();
-        const m = clean.match(/^(?:require\s+)?([^\s]+)\s+(v[0-9]+\.[0-9]+\.[0-9]+[^\s]*)/);
+        const m = clean.match(/^(?:require\s+)?([^\s]+)\s+(v[0-9]+\.[0-9]+\.[0-9]+[^\s/]*)/);
         if (!m) return;
         for (const adv of GO_ADVISORIES) {
           if (m[1] === adv.pkg && isPinnedBelow(m[2], adv.below)) {
-            emit(makeDepFinding(adv, rel, idx + 1, lineText.trim(), m[2]));
+            emit(makeDepFinding(adv, rel, idx + 1, lineText.trim(), m[2], reachOf(m[1])));
           }
         }
       });
@@ -238,9 +359,34 @@ async function auditDependencies(scanRoot) {
         for (const adv of RUST_ADVISORIES) {
           if (nameMatch[1] === adv.pkg && isPinnedBelow(verMatch[1], adv.below)) {
             const loc = findLine(raw, `name = "${adv.pkg}"`);
-            emit(makeDepFinding(adv, rel, loc.line, `${adv.pkg} = "${verMatch[1]}"`, verMatch[1]));
+            emit(makeDepFinding(adv, rel, loc.line, `${adv.pkg} = "${verMatch[1]}"`, verMatch[1], null));
           }
         }
+      }
+    }
+  }
+
+  if (options.syncOsv || options.osvCachePath) {
+    const cachePath = options.osvCachePath || path.join(scanRoot, '.osien-osv-cache.json');
+    const osvMap = options.syncOsv
+      ? await queryOsvBatch(osvQueries, cachePath)
+      : (() => {
+          try { return JSON.parse(require('node:fs').readFileSync(cachePath, 'utf8')); } catch { return {}; }
+        })();
+    for (const p of extractedPkgs) {
+      const key = `${p.ecosystem}:${p.name}@${p.version}`;
+      const vulns = osvMap[key];
+      if (Array.isArray(vulns) && vulns.length > 0) {
+        const ids = vulns.map((v) => v.id).slice(0, 3).join(', ');
+        emit(makeDepFinding({
+          id: `osv-${p.name}-${vulns[0].id}`.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
+          pkg: p.name,
+          below: 'patched',
+          severity: 'high',
+          cwe: 'CWE-1395',
+          title: `OSV Advisory ${ids} in ${p.name}`,
+          hint: `Upgrade ${p.name} (${p.version}) to a patched release listed in OSV (${ids}).`,
+        }, p.rel, p.line, `${p.name}@${p.version}`, p.version, reachOf(p.name)));
       }
     }
   }
@@ -248,4 +394,4 @@ async function auditDependencies(scanRoot) {
   return findings;
 }
 
-module.exports = { auditDependencies, isPinnedBelow };
+module.exports = { auditDependencies, isPinnedBelow, collectImportedPackages, queryOsvBatch };

@@ -173,3 +173,55 @@ test('Driftpost false-positive regression guard (HMAC .update, guarded cache/nam
   ].includes(f.ruleId));
   assert.equal(fp.length, 0, `expected 0 false positives, got: ${fp.map((f) => `${f.ruleId}:${f.line}`).join(', ')}`);
 });
+
+test('Type-aware + CFG + Router-tree + Reachable Lockfile/OSV + AST Polyglot engine upgrades', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'deepcheck-nextgen-'));
+  await fs.writeFile(path.join(dir, 'vault.js'), 'export async function saveVault(v) { return v; }\n');
+  await fs.writeFile(path.join(dir, 'app.js'), [
+    'import { saveVault } from "./vault.js";',
+    'import lodash from "lodash";',
+    'export function badCfg(flag) {',
+    '  saveVault(1);',
+    '  const items = [1, 2, 3];',
+    '  delete items[0];',
+    '  let rec = null;',
+    '  if (!flag) { console.log("warn"); }',
+    '  return rec.id;',
+    '}',
+    'app.use("/api/private", requireAuth);',
+    'app.post("/api/private/save", (req, res) => { res.json({ ok: lodash.isArray([]) }); });',
+    'app.post("/api/meta/deauthorize", (req, res) => {',
+    '  const sig = crypto.createHmac("sha256", secret).update(req.body).digest("hex");',
+    '  res.json({ sig });',
+    '});',
+    'app.get("/api/run", (req, res) => { exec(req.query.cmd); res.end(); });',
+  ].join('\n'));
+
+  await fs.writeFile(path.join(dir, 'pnpm-lock.yaml'), "lockfileVersion: '6.0'\npackages:\n  /lodash@4.17.20:\n    resolution: {}\n");
+  await fs.writeFile(path.join(dir, 'Contract.sol'), [
+    'contract Vault {',
+    '  function auth() public view { require(tx.origin == owner); }',
+    '  function pay(address payable t) public { t.call{value: 1}(""); }',
+    '}',
+  ].join('\n'));
+  await fs.writeFile(path.join(dir, 'safe.py'), [
+    'import shlex, os',
+    'def run_safe(request):',
+    '  cmd = shlex.quote(request.args.get("x"))',
+    '  os.system(cmd)',
+  ].join('\n'));
+
+  const report = await scanProjectRoot(dir, 'API / backend', { bugsOnly: true });
+  const ids = new Set(report.findings.map((f) => f.ruleId));
+  assert.ok(ids.has('type-floating-promise'), 'detects cross-file floating promise via type inference');
+  assert.ok(ids.has('type-delete-array-element'), 'detects delete on typed array');
+  assert.ok(ids.has('cfg-null-deref'), 'detects CFG null deref');
+  assert.ok(ids.has('js-reachable-unauth-sink'), 'detects reachable unauthenticated sink');
+  assert.ok(!ids.has('js-route-missing-auth'), 'recognizes app.use prefix auth and webhook HMAC');
+  assert.ok(ids.has('dep-npm-lodash-cve'), 'parses pnpm-lock.yaml');
+  const lodashFinding = report.findings.find((f) => f.ruleId === 'dep-npm-lodash-cve');
+  assert.equal(lodashFinding?.reachable, true, 'marks imported lodash as reachable');
+  assert.ok(ids.has('sol-tx-origin-auth'), 'detects Solidity tx.origin auth');
+  assert.ok(ids.has('sol-unchecked-call'), 'detects Solidity unchecked low-level call');
+  assert.ok(!ids.has('py-taint-sink'), 'clears Python taint after shlex.quote');
+});
