@@ -695,7 +695,9 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
         if (stmt.type === 'ImportDeclaration' && stmt.source?.value) {
           const allTypeSpecs = Array.isArray(stmt.specifiers) && stmt.specifiers.length > 0 && stmt.specifiers.every((sp) => sp.importKind === 'type');
           const importKind = (stmt.importKind === 'type' || allTypeSpecs) ? 'type' : 'value';
-          const importKey = `${importKind}:${stmt.source.value}`;
+          const isNamespace = Array.isArray(stmt.specifiers) && stmt.specifiers.some((sp) => sp.type === 'ImportNamespaceSpecifier');
+          const isSideEffect = !stmt.specifiers || stmt.specifiers.length === 0;
+          const importKey = `${importKind}:${isNamespace ? 'ns' : (isSideEffect ? 'side' : 'named')}:${stmt.source.value}`;
           if (seenImports.has(importKey)) {
             emit({
               id: 'js-duplicate-import',
@@ -979,10 +981,11 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
           }, node, 'high', `Sensitive identifier "${identifierName(leaked)}" is passed to console.${name}().`);
         }
       }
-      if (node.type === 'CallExpression' && parent?.type === 'ExpressionStatement' && node.callee?.property?.name === 'then' && (node.callee?.type === 'MemberExpression' || node.callee?.type === 'OptionalMemberExpression') && node.arguments.length < 2 && !/\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(file || '')) {
+      const isNonProdPath = /(?:^|[\\/])(?:test|tests|__tests__|spec|specs|benchmark|benchmarks|fixtures?|examples?)(?:[\\/]|$)/i.test(file || '');
+      if (node.type === 'CallExpression' && parent?.type === 'ExpressionStatement' && node.callee?.property?.name === 'then' && (node.callee?.type === 'MemberExpression' || node.callee?.type === 'OptionalMemberExpression') && node.arguments.length < 2 && !/\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(file || '') && !isNonProdPath) {
         const after = raw.slice(node.end || 0, (node.end || 0) + 120);
         if (!/^\s*\.\s*(?:catch|finally)\b/.test(after)) {
-          emit('js-promise-no-catch', node, 'medium', 'Promise chain has no rejection handler; attach .catch or provide an onRejected callback.');
+          emit('js-promise-no-catch', node, 'low', 'Promise chain has no rejection handler; attach .catch or provide an onRejected callback.');
         }
       }
       if (['map', 'filter', 'find', 'some', 'every', 'reduce'].includes(name) && node.arguments[0]
