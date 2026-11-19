@@ -654,8 +654,8 @@ function analyzeJavaScriptAst(raw, file, catalog, taint, suppressions, makeFindi
       }
     }
 
-    // Unparenthesized assignment in return statement: return x = y.
-    if (node.type === 'ReturnStatement' && node.argument?.type === 'AssignmentExpression' && !node.argument.extra?.parenthesized) {
+    // Unparenthesized assignment in return statement: return x = y (skip ??=, ||=, &&= lazy memoization).
+    if (node.type === 'ReturnStatement' && node.argument?.type === 'AssignmentExpression' && node.argument.operator === '=' && !node.argument.extra?.parenthesized) {
       emit({
         id: 'js-assign-in-return',
         title: 'Assignment inside return statement',

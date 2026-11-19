@@ -103,8 +103,8 @@ function entropy(value) {
 // rules never fire on prose, while keeping every offset and line number intact.
 // Quote characters survive, so rules about string usage still see the quotes.
 function mask(text, lang, blankStrings) {
-  if (!['js', 'py', 'css', 'sh', 'sql', 'html', 'generic'].includes(lang)) return text;
-  const lineMarker = lang === 'py' || lang === 'sh' ? '#' : lang === 'sql' ? '--' : lang === 'css' ? null : '//';
+  if (!['js', 'py', 'css', 'sh', 'sql', 'html', 'generic', 'yaml'].includes(lang)) return text;
+  const lineMarker = ['py', 'sh', 'yaml'].includes(lang) ? '#' : lang === 'sql' ? '--' : lang === 'css' ? null : '//';
   const ranges = [];
   let state = 'code';
   let quote = '';
@@ -293,6 +293,14 @@ function dedupeFindings(findings) {
 
 function dedupeByCweLocation(findings) {
   const sevRank = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
+  const aliasFamily = {
+    'exp-js-promise-constructor-anti': 'promise-async-executor',
+    'js-async-promise-executor': 'promise-async-executor',
+    'exp-py-flask-debug-true': 'flask-debug',
+    'py-debug-true': 'flask-debug',
+    'exp-py-flask-render-string': 'flask-ssti',
+    'py-flask-render-template-string': 'flask-ssti',
+  };
   const bestByCweLoc = new Map();
   const ordered = [];
   for (const finding of findings) {
@@ -300,8 +308,9 @@ function dedupeByCweLocation(findings) {
     if ((finding.ruleId?.startsWith('c-') || finding.ruleId?.startsWith('cpp-')) && !['.c', '.h', '.cc', '.cpp', '.hpp', '.cxx'].includes(ext)) {
       continue;
     }
-    if (finding.cwe) {
-      const cweKey = `${finding.file}:${finding.line}:${finding.cwe}`;
+    const family = aliasFamily[finding.ruleId] || finding.cwe;
+    if (family) {
+      const cweKey = `${finding.file}:${finding.line}:${family}`;
       const existingIdx = bestByCweLoc.get(cweKey);
       if (existingIdx !== undefined) {
         const existing = ordered[existingIdx];
@@ -637,9 +646,9 @@ function scanFileContent(raw, rel, extName, lang, catalog, applicableByLang) {
     applicableByLang?.set(lang, applicable);
   }
   const lines = raw.split(/\r?\n/);
-  const needsMasking = ['js', 'py', 'css', 'sh', 'sql', 'generic'].includes(lang);
+  const needsMasking = ['js', 'py', 'css', 'sh', 'sql', 'generic', 'yaml'].includes(lang);
   const commentText = needsMasking ? stripComments(raw, lang) : raw;
-  const codeText = needsMasking ? maskCommentsThenStrings(commentText, lang, []) : raw;
+  const codeText = needsMasking ? (lang === 'yaml' ? commentText : maskCommentsThenStrings(commentText, lang, [])) : raw;
   const commentLines = commentText.split(/\r?\n/);
   const codeLines = codeText.split(/\r?\n/);
   const suppressions = suppressionMap(lines);
@@ -788,7 +797,7 @@ async function scanProjectRoot(root, kind, options = {}) {
         queue.push(full);
         continue;
       }
-      if (!entry.isFile() || ignoredFiles.has(entry.name.toLowerCase())) continue;
+      if (!entry.isFile() || ignoredFiles.has(entry.name.toLowerCase()) || /\.(?:gen|generated|pb|g)\.[cm]?[jt]sx?$/i.test(entry.name)) continue;
       if (/\.(?:min|bundle)\.(?:js|css|mjs|cjs)$/i.test(entry.name)) continue;
       if (ignorePatterns.some((rx) => rx.test(ignorePath))) continue;
       const extName = path.extname(entry.name).toLowerCase();
@@ -843,7 +852,7 @@ async function scanProjectRoot(root, kind, options = {}) {
       if (findings.length >= MAX_FINDINGS) { truncated = true; break; }
     }
     if (!truncated) {
-      const typeCfg = analyzeTypeAndCfgProject(jsFiles, { makeFinding, parseSuppressions: suppressionMap, isSuppressed: suppressed }, scanRoot);
+      const typeCfg = await analyzeTypeAndCfgProject(jsFiles, { makeFinding, parseSuppressions: suppressionMap, isSuppressed: suppressed }, scanRoot);
       if (typeCfg.suppressRegexIds && typeCfg.suppressRegexIds.size > 0) {
         for (let i = findings.length - 1; i >= 0; i--) {
           const f = findings[i];

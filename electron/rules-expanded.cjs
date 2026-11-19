@@ -944,7 +944,7 @@ function buildParameterizedSharedRules() {
       'el.innerHTML = window.name;', 'el.textContent = data;', 'window.name persists across origins; treat it as untrusted input.'],
     [js, 'sec-localstorage-jwt', 'JWT/auth token stored in localStorage (XSS-accessible)', 'low', 'CWE-922', /\blocalStorage\.setItem\s*\(\s*['"][^'"]*(?:jwt|access_token|refresh_token|auth_token)['"]/i,
       'localStorage.setItem("access_token", tok);', 'setHttpOnlySessionCookie();', 'Prefer HttpOnly Secure cookies over localStorage for long-lived auth tokens.'],
-    [js, 'sec-postmessage-no-origin', 'message event listener reads event.data without checking event.origin', 'high', 'CWE-345', /addEventListener\s*\(\s*['"]message['"]\s*,\s*\([^)]*\)\s*=>\s*\{(?![^}]*origin)/,
+    [js, 'sec-postmessage-no-origin', 'message event listener reads event.data without checking event.origin', 'high', 'CWE-345', /addEventListener\s*\(\s*['"]message['"]\s*,\s*\([^)]*\)\s*=>\s*\{(?![\s\S]{0,400}\borigin\b)/,
       'window.addEventListener("message", (e) => { apply(e.data); });', 'window.addEventListener("message", (e) => { if (e.origin === TRUSTED) apply(e.data); });', 'Always verify event.origin inside postMessage handlers.'],
     [py, 'sec-py-os-execl', 'os.execl / os.execv family replaces process', 'medium', 'CWE-78', /\bos\.exec[lv]p?e?\s*\(/,
       'os.execl("/bin/sh", "sh", "-c", cmd)', 'subprocess.run(args, check=True)', 'Prefer subprocess.run(..., shell=False) over os.exec*.'],

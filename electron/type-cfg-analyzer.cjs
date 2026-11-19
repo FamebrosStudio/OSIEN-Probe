@@ -4,8 +4,53 @@
 // - Cross-file Promise / Array / Nullable / Crypto-vs-ORM type resolution
 // - Basic-block CFG with forward fixed-point nullability dataflow & branch narrowing
 
+const fs = require('node:fs/promises');
 const path = require('node:path');
 const { parse } = require('@babel/parser');
+
+async function indexDtsPromiseFns(scanRoot, jsFiles) {
+  const pkgPromiseFns = new Map(); // "pkg" -> Set<fnName>
+  const dtsRe = /export\s+(?:declare\s+)?function\s+([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\([^)]*\)\s*:\s*Promise\s*</g;
+
+  // 1. Project-local .d.ts files
+  const localDts = new Map();
+  for (const f of jsFiles) {
+    if (!f.rel.endsWith('.d.ts')) continue;
+    const set = new Set();
+    for (const m of f.raw.matchAll(dtsRe)) set.add(m[1]);
+    if (set.size > 0) localDts.set(f.rel, set);
+  }
+
+  // 2. Direct dependencies in package.json -> node_modules/<pkg>/*.d.ts or @types/<pkg>/index.d.ts
+  if (scanRoot) {
+    try {
+      const pkgRaw = await fs.readFile(path.join(scanRoot, 'package.json'), 'utf8');
+      const pkg = JSON.parse(pkgRaw);
+      const deps = Object.keys({ ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) }).slice(0, 40);
+      for (const dep of deps) {
+        const cleanDep = dep.replace(/^@/, '').replace('/', '__');
+        const candidates = [
+          path.join(scanRoot, 'node_modules', dep, 'index.d.ts'),
+          path.join(scanRoot, 'node_modules', dep, 'dist', 'index.d.ts'),
+          path.join(scanRoot, 'node_modules', '@types', cleanDep, 'index.d.ts'),
+        ];
+        for (const c of candidates) {
+          try {
+            const raw = await fs.readFile(c, 'utf8');
+            const set = new Set();
+            for (const m of raw.matchAll(dtsRe)) set.add(m[1]);
+            if (set.size > 0) { pkgPromiseFns.set(dep, set); break; }
+          } catch {
+            // Optional .d.ts candidate
+          }
+        }
+      }
+    } catch {
+      // package.json optional
+    }
+  }
+  return { localDts, pkgPromiseFns };
+}
 
 function parseAst(raw, extName) {
   const plugins = ['jsx', 'decorators-legacy', 'classProperties', 'dynamicImport', 'optionalChaining', 'nullishCoalescingOperator', 'topLevelAwait'];
@@ -414,11 +459,12 @@ function analyzeFunctionCfg(fnNode, rel, lines, makeFinding, isSuppressed, suppr
   return findings;
 }
 
-function analyzeTypeAndCfgProject(jsFiles, helpers, _scanRoot) {
+async function analyzeTypeAndCfgProject(jsFiles, helpers, scanRoot) {
   const { makeFinding, parseSuppressions, isSuppressed } = helpers;
   const findings = [];
   if (!Array.isArray(jsFiles) || jsFiles.length === 0) return { findings, suppressRegexIds: new Map() };
 
+  const dtsIndex = await indexDtsPromiseFns(scanRoot, jsFiles);
   const parsedFiles = new Map();
   const fileSet = new Set(jsFiles.map((f) => f.rel));
   const exportedTypes = new Map(); // file -> Map<exportName, type>
@@ -466,17 +512,22 @@ function analyzeTypeAndCfgProject(jsFiles, helpers, _scanRoot) {
     const suppressions = parseSuppressions ? parseSuppressions(lines) : null;
     const localTypes = new Map();
 
-    // Resolve imported symbol types
+    // Resolve imported symbol types (from project files, local .d.ts, and node_modules .d.ts)
     for (const stmt of ast.program.body) {
       if (stmt.type === 'ImportDeclaration') {
-        const target = resolveImportTarget(stmt.source?.value, rel, fileSet);
+        const src = stmt.source?.value || '';
+        const target = resolveImportTarget(src, rel, fileSet);
         const exp = target ? exportedTypes.get(target) : null;
-        if (exp) {
-          for (const spec of stmt.specifiers) {
-            const importedName = spec.imported?.name || spec.local?.name;
-            const localName = spec.local?.name;
-            const t = exp.get(importedName);
-            if (t && localName) localTypes.set(`fn:${localName}`, t);
+        const pkgDts = !src.startsWith('.') ? dtsIndex.pkgPromiseFns.get(src) : null;
+        const localDts = target ? dtsIndex.localDts.get(target.replace(/\.[cm]?[jt]sx?$/, '.d.ts')) : null;
+        for (const spec of stmt.specifiers) {
+          const importedName = spec.imported?.name || spec.local?.name;
+          const localName = spec.local?.name;
+          if (!localName) continue;
+          const t = exp?.get(importedName);
+          if (t) localTypes.set(`fn:${localName}`, t);
+          else if (pkgDts?.has(importedName) || localDts?.has(importedName)) {
+            localTypes.set(`fn:${localName}`, 'promise');
           }
         }
       }

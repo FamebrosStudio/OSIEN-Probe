@@ -225,3 +225,37 @@ test('Type-aware + CFG + Router-tree + Reachable Lockfile/OSV + AST Polyglot eng
   assert.ok(ids.has('sol-unchecked-call'), 'detects Solidity unchecked low-level call');
   assert.ok(!ids.has('py-taint-sink'), 'clears Python taint after shlex.quote');
 });
+
+test('Real-world gap fixes: YAML comments, .gen.ts skip, ??= return, promise-executor dedupe, nested postMessage origin, and .d.ts Promise indexing', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'deepcheck-realgaps-'));
+  await fs.mkdir(path.join(dir, '.github', 'workflows'), { recursive: true });
+  await fs.writeFile(path.join(dir, '.github', 'workflows', 'ci.yml'), [
+    'on: push',
+    '# Note: pull_request_target: is only in this comment',
+    'jobs: {}',
+  ].join('\n'));
+  await fs.writeFile(path.join(dir, 'sdk.gen.ts'), 'export function f() { return eval("1"); }\n');
+  await fs.writeFile(path.join(dir, 'mailer.d.ts'), 'export declare function sendMail(to: string): Promise<void>;\n');
+  await fs.writeFile(path.join(dir, 'mailer.js'), 'export function sendMail() { return Promise.resolve(); }\n');
+  await fs.writeFile(path.join(dir, 'index.ts'), [
+    'import { sendMail } from "./mailer";',
+    'export class Client {',
+    '  private _sub?: any;',
+    '  get sub() { return this._sub ??= {}; }',
+    '  notify() { sendMail("a@b.com"); }',
+    '}',
+    'window.addEventListener("message", (e) => { if (e.data) { if (e.origin !== "https://ok.test") return; } });',
+    'export function badPromise() { return new Promise(async (resolve) => { resolve(1); }); }',
+  ].join('\n'));
+
+  const report = await scanProjectRoot(dir, 'Software', { bugsOnly: true });
+  const ids = report.findings.map((f) => f.ruleId);
+  assert.ok(!ids.includes('exp-yaml-gha-pull-request-target'), 'ignores YAML # comments');
+  assert.ok(!ids.includes('yaml-gha-pull-request-target'), 'ignores YAML # comments');
+  assert.ok(!report.findings.some((f) => f.file.endsWith('sdk.gen.ts')), 'skips generated .gen.ts files');
+  assert.ok(!ids.includes('js-assign-in-return'), 'allows ??= lazy memoization in return');
+  assert.ok(!ids.includes('sec-postmessage-no-origin'), 'recognizes nested event.origin guard');
+  assert.ok(ids.includes('type-floating-promise'), 'resolves Promise return from .d.ts / module');
+  const promiseFindings = report.findings.filter((f) => f.file === 'index.ts' && f.line === 8);
+  assert.equal(promiseFindings.length, 1, 'collapses duplicate async-promise-executor rules on same line');
+});
