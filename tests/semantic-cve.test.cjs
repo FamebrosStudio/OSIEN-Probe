@@ -259,3 +259,43 @@ test('Real-world gap fixes: YAML comments, .gen.ts skip, ??= return, promise-exe
   const promiseFindings = report.findings.filter((f) => f.file === 'index.ts' && f.line === 8);
   assert.equal(promiseFindings.length, 1, 'collapses duplicate async-promise-executor rules on same line');
 });
+
+test('Expanded framework & polyglot detectors: Next.js Server Actions, SSRF taint, NoSQL injection, Go path traversal, Rust SQL/shell', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'deepcheck-expanded-'));
+  await fs.writeFile(path.join(dir, 'actions.ts'), [
+    '"use server";',
+    'export async function deleteProject(id: string) {',
+    '  await prisma.project.delete({ where: { id } });',
+    '}',
+  ].join('\n'));
+  await fs.writeFile(path.join(dir, 'api.js'), [
+    'app.post("/api/proxy", async (req, res) => {',
+    '  const r = await axios.get(req.body.url);',
+    '  const u = await User.findOne(req.body);',
+    '  res.json({ r, u });',
+    '});',
+  ].join('\n'));
+  await fs.writeFile(path.join(dir, 'handler.go'), [
+    'package main',
+    'func readDoc(w http.ResponseWriter, r *http.Request) {',
+    '  name := r.URL.Query().Get("file")',
+    '  data, _ := os.ReadFile("/var/docs/" + name)',
+    '  w.Write(data)',
+    '}',
+  ].join('\n'));
+  await fs.writeFile(path.join(dir, 'db.rs'), [
+    'pub fn find_user(id: &str) {',
+    '  let q = sqlx::query(&format!("SELECT * FROM users WHERE id = {}", id));',
+    '  Command::new("sh").arg("-c").arg(id);',
+    '}',
+  ].join('\n'));
+
+  const report = await scanProjectRoot(dir, 'API / backend', { bugsOnly: true });
+  const ids = new Set(report.findings.map((f) => f.ruleId));
+  assert.ok(ids.has('js-server-action-no-auth'), 'detects unauthenticated Next.js Server Action');
+  assert.ok(ids.has('js-ssrf-taint') || ids.has('js-ssrf'), 'detects SSRF taint into axios.get(req.body.url)');
+  assert.ok(ids.has('js-nosql-injection'), 'detects raw req.body passed to findOne()');
+  assert.ok(ids.has('go-path-traversal'), 'detects Go path traversal into os.ReadFile');
+  assert.ok(ids.has('rust-sql-format'), 'detects Rust sqlx::query(&format!(...))');
+  assert.ok(ids.has('rust-cmd-shell-taint') || ids.has('polyglot-rust-shell'), 'detects Rust Command::new("sh").arg("-c").arg(id)');
+});

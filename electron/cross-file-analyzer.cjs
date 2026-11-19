@@ -592,6 +592,71 @@ async function analyzeCrossFileProject(jsFiles, helpers, scanRoot = '') {
     }
   }
 
+  // 4. Next.js 'use server' Server Actions missing auth, SSRF taint, and NoSQL operator injection.
+  const SERVER_ACTION_MUTATE_RE = /\b(?:prisma\.\w+\.(?:create|update|delete|upsert)|db\.(?:insert|update|delete)|supabase\.from\([^)]*\)\.(?:insert|update|delete|upsert)|fs\.(?:writeFile|unlink|rm))\b/;
+  const SERVER_ACTION_AUTH_RE = /\b(?:auth|getSession|getServerSession|currentUser|getUser|requireAuth|verifySession|authenticate|checkAuth)\s*\(/i;
+  const SSRF_CALL_RE = /\b(?:fetch|axios\.(?:get|post|put|delete|request)|got)\s*\(\s*([^,)]+)/;
+  const NOSQL_CALL_RE = /\.(?:find|findOne|findOneAndUpdate|updateOne|deleteOne|countDocuments)\s*\(\s*(req\.(?:body|query)|request\.(?:body|query))\s*[,)]/;
+
+  for (const pf of parsedFiles) {
+    const raw = pf.entry.raw;
+    const lines = raw.split(/\r?\n/);
+    const isTest = /(?:^|\/)(?:tests?|__tests__|spec|scripts?)\/|\.(?:test|spec)\./i.test(pf.relNorm);
+    if (isTest) continue;
+
+    // 4a. Next.js 'use server' exported async mutations without session/auth check
+    const hasUseServer = /^\s*['"]use server['"]\s*;?/m.test(raw.slice(0, 300));
+    if (hasUseServer) {
+      checksRun++;
+      walk(pf.ast, (node) => {
+        if (node.type === 'ExportNamedDeclaration' && node.declaration?.type === 'FunctionDeclaration' && node.declaration.async) {
+          const fn = node.declaration;
+          const fnName = fn.id?.name || 'action';
+          if (/^(?:login|signin|signup|register|resetPassword)/i.test(fnName)) return;
+          const fnSrc = raw.slice(fn.start, fn.end);
+          if (SERVER_ACTION_MUTATE_RE.test(fnSrc) && !SERVER_ACTION_AUTH_RE.test(fnSrc)) {
+            const line = fn.loc?.start.line || 1;
+            pushFinding(pf, {
+              id: 'js-server-action-no-auth',
+              title: `Next.js Server Action "${fnName}()" mutates data without auth/session check`,
+              severity: 'high',
+              cwe: 'CWE-306',
+              confidence: 'high',
+              hint: `Verify the authenticated user (e.g. await auth() / getSession()) at the top of "${fnName}()" before mutating state.`,
+            }, line, lines[line - 1] || '', `'use server' action "${fnName}" performs a DB/file mutation without calling an auth/session helper.`);
+          }
+        }
+      });
+    }
+
+    // 4b. SSRF taint & NoSQL operator injection
+    checksRun++;
+    for (let i = 0; i < lines.length; i++) {
+      const lineStr = lines[i];
+      const ssrfM = SSRF_CALL_RE.exec(lineStr);
+      if (ssrfM && REQUEST_TAINT_RE.test(ssrfM[1]) && !/ALLOWED_HOSTS|hostname\s*===|startsWith\s*\(\s*['"]https:\/\//.test(raw.slice(Math.max(0, raw.indexOf(lineStr) - 300), raw.indexOf(lineStr) + lineStr.length))) {
+        pushFinding(pf, {
+          id: 'js-ssrf-taint',
+          title: 'Potential SSRF: request-controlled URL passed to outbound HTTP client',
+          severity: 'high',
+          cwe: 'CWE-918',
+          confidence: 'high',
+          hint: 'Validate the URL scheme (https:) and allowlist permitted hostnames before calling fetch/axios.',
+        }, i + 1, lineStr, 'User-controlled request input flows directly into an outbound HTTP fetch/axios call.');
+      }
+      if (NOSQL_CALL_RE.test(lineStr)) {
+        pushFinding(pf, {
+          id: 'js-nosql-injection',
+          title: 'Potential NoSQL operator injection: raw req.body/req.query passed to DB query',
+          severity: 'high',
+          cwe: 'CWE-943',
+          confidence: 'high',
+          hint: 'Pick explicit scalar fields (e.g. { email: String(req.body.email) }) instead of passing raw req.body/req.query to Mongoose/Mongo.',
+        }, i + 1, lineStr, 'Passing raw req.body/req.query allows attackers to inject $ne, $gt, or $regex operators.');
+      }
+    }
+  }
+
   return { findings, checksRun };
 }
 

@@ -251,6 +251,7 @@ function analyzePythonTaint(raw, rel) {
 const GO_SOURCE_RE = /\b(?:r\.URL\.Query\s*\(|r\.FormValue\s*\(|c\.(?:Query|Param|PostForm)\s*\()/;
 const GO_SANITIZER_RE = /\b(?:strconv\.(?:Atoi|ParseInt|ParseFloat)|filepath\.Base)\s*\(/;
 const GO_SINK_RE = /\b(?:db\.(?:Query|Exec|QueryRow)\s*\(|exec\.Command\s*\(\s*"(?:sh|bash)"\s*,\s*"-c")/;
+const GO_PATH_SINK_RE = /\b(?:os\.(?:ReadFile|Open|WriteFile|Remove)|ioutil\.ReadFile)\s*\(/;
 
 function analyzeGoTaint(raw, rel) {
   const findings = [];
@@ -284,6 +285,50 @@ function analyzeGoTaint(raw, rel) {
         ));
       }
     }
+
+    if (GO_PATH_SINK_RE.test(trimmed) && !GO_SANITIZER_RE.test(trimmed)) {
+      const usesTainted = GO_SOURCE_RE.test(trimmed) || [...tainted].some((v) => new RegExp(`\\b${v}\\b`).test(trimmed));
+      if (usesTainted) {
+        findings.push(buildFinding(
+          rel, i + 1, 'go-path-traversal',
+          'HTTP request input flows into Go filesystem read/write sink',
+          'high', 'CWE-22',
+          'Sanitize filenames with filepath.Base() and verify the resolved path stays inside an allowed base directory.',
+          'Tainted HTTP request input flows into os.ReadFile/os.Open/os.Remove without filepath.Base.',
+          trimmed,
+        ));
+      }
+    }
+  }
+  return findings;
+}
+
+function analyzeRustSemantic(raw, rel) {
+  const findings = [];
+  const lines = raw.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed || trimmed.startsWith('//')) continue;
+    if (/sqlx::query\s*\(\s*&?format!\s*\(/.test(trimmed) || /\.execute\s*\(\s*&?format!\s*\(/.test(trimmed)) {
+      findings.push(buildFinding(
+        rel, i + 1, 'rust-sql-format',
+        'Rust SQL query built with format!() interpolation',
+        'high', 'CWE-89',
+        'Use bound parameters (.bind(value)) with sqlx::query("SELECT ... WHERE id = $1") instead of format!().',
+        'Dynamic format!() string is passed directly into SQL query execution.',
+        trimmed,
+      ));
+    }
+    if (/Command::new\s*\(\s*"(?:sh|bash)"\s*\)\s*\.arg\s*\(\s*"-c"\s*\)\s*\.arg\s*\(\s*&?[A-Za-z_]\w*/.test(trimmed)) {
+      findings.push(buildFinding(
+        rel, i + 1, 'rust-cmd-shell-taint',
+        'Dynamic variable passed to sh -c via std::process::Command',
+        'high', 'CWE-78',
+        'Pass the executable and individual arguments via Command::new(bin).arg(arg) without a shell.',
+        'Command::new("sh").arg("-c").arg(var) enables shell injection if var contains untrusted input.',
+        trimmed,
+      ));
+    }
   }
   return findings;
 }
@@ -292,6 +337,7 @@ function analyzeSemanticPolyglot(raw, rel, extName) {
   if (extName === '.sol') return analyzeSolidity(raw, rel);
   if (extName === '.py') return analyzePythonTaint(raw, rel);
   if (extName === '.go') return analyzeGoTaint(raw, rel);
+  if (extName === '.rs') return analyzeRustSemantic(raw, rel);
   return [];
 }
 
