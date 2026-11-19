@@ -457,7 +457,7 @@ function analyzeHtmlStructure(raw, file, lines, catalog, suppressions) {
 
   for (let i = 0; i < lines.length; i++) {
     const lineNum = i + 1;
-    const matches = lines[i].matchAll(/\bid\s*=\s*["']([^"'\s]+)["']/gi);
+    const matches = lines[i].matchAll(/(?<![\w-])id\s*=\s*["']([^"'\s]+)["']/gi);
     for (const m of matches) {
       const idVal = m[1];
       if (seenIds.has(idVal)) {
@@ -892,20 +892,8 @@ async function scanProjectRoot(root, kind, options = {}) {
   const testCommand = testPlan.testCommand || await detectTestCommand(scanRoot);
 
   const uniqueFindings = dedupeFindings(findings);
-  const styleHintRules = new Set([
-    'css-important', 'css-transition-all', 'css-fixed-height', 'css-user-select-none',
-    'js-console-log', 'js-todo', 'js-commented-code', 'js-loose-equality', 'js-missing-strict',
-    'js-v' + 'ar', 'py-print', 'py-todo', 'ml-print-progress', 'lib-console-log-noise',
-    'exp-logic-return-await-redundancy', 'exp-js-isNaN-global', 'exp-js-isFinite-global',
-    'exp-js-parseint-no-radix', 'js-loose-inequality-null',
-    'html-no-csp', 'html-noscript', 'html-input-no-type', 'html-label-no-for',
-    'html-button-no-type', 'html-empty-href', 'py-wildcard-import',
-    'lib-no-entry', 'lib-no-files-allowlist',
-    'polyglot-syntax-error', 'js-undeclared-var',
-    'js-promise-no-catch', 'js-fixme', 'js-disabled-test', 'exp-logic-addeventlistener-anon',
-  ]);
   const filteredFindings = options.bugsOnly
-    ? dedupeByCweLocation(uniqueFindings.filter((f) => !styleHintRules.has(f.ruleId)))
+    ? dedupeByCweLocation(uniqueFindings.filter((f) => !STYLE_HINT_RULES.has(f.ruleId)))
     : uniqueFindings;
   const selected = options.maxFindings ? filteredFindings.slice(0, options.maxFindings) : filteredFindings;
   const capped = selected.slice(0, MAX_FINDINGS);
@@ -1037,8 +1025,23 @@ function toMarkdownReport(scan, project = {}) {
   return lines.join('\n');
 }
 
+const STYLE_HINT_RULES = new Set([
+  'css-important', 'css-transition-all', 'css-fixed-height', 'css-user-select-none',
+  'js-console-log', 'js-todo', 'js-commented-code', 'js-loose-equality', 'js-missing-strict',
+  'js-v' + 'ar', 'py-print', 'py-todo', 'ml-print-progress', 'lib-console-log-noise',
+  'exp-logic-return-await-redundancy', 'exp-js-isNaN-global', 'exp-js-isFinite-global',
+  'exp-js-parseint-no-radix', 'js-loose-inequality-null',
+  'html-no-csp', 'html-noscript', 'html-input-no-type', 'html-label-no-for',
+  'html-button-no-type', 'html-empty-href', 'html-inline-script', 'py-wildcard-import',
+  'lib-no-entry', 'lib-no-files-allowlist',
+  'polyglot-syntax-error', 'js-undeclared-var',
+  'js-promise-no-catch', 'js-fixme', 'js-disabled-test', 'exp-logic-addeventlistener-anon',
+]);
+
 module.exports = {
   scanProjectRoot,
+  scanFileContent,
+  dedupeByCweLocation,
   discoverTestPlan,
   scoreFor,
   dedupeFindings,
@@ -1051,6 +1054,7 @@ module.exports = {
   toSarifReport,
   toMarkdownReport,
   kinds,
+  STYLE_HINT_RULES,
   shared,
   categoryRules,
   MAX_FINDINGS,

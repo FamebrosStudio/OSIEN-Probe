@@ -299,3 +299,42 @@ test('Expanded framework & polyglot detectors: Next.js Server Actions, SSRF tain
   assert.ok(ids.has('rust-sql-format'), 'detects Rust sqlx::query(&format!(...))');
   assert.ok(ids.has('rust-cmd-shell-taint') || ids.has('polyglot-rust-shell'), 'detects Rust Command::new("sh").arg("-c").arg(id)');
 });
+
+test('Live Web Auditor checks HTTP headers, cookies, and HTML without data-id or rel-before-target false positives', async () => {
+  const http = require('node:http');
+  const { scanLiveUrl } = require('../electron/web-auditor.cjs');
+  const html = [
+    '<!doctype html><html><body>',
+    '<a data-id="100" rel="noopener noreferrer" target="_blank" href="https://example.com">Safe</a>',
+    '<a data-id="100" href="https://example.com">Also safe</a>',
+    '<search role="search"><form method="get" action="/"><input name="q"></form></search>',
+    '</body></html>',
+  ].join('\n');
+
+  const srv = http.createServer((_req, res) => {
+    res.writeHead(200, {
+      'content-type': 'text/html; charset=utf-8',
+      'content-security-policy': 'upgrade-insecure-requests',
+      'x-powered-by': 'PHP/8.2.35',
+      'set-cookie': '_fbp=123; path=/',
+    });
+    res.end(html);
+  });
+
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = srv.address();
+    const report = await scanLiveUrl(`http://127.0.0.1:${port}/`, { bugsOnly: true });
+    const ids = new Set(report.findings.map((f) => f.ruleId));
+    assert.ok(ids.has('web-weak-csp'), 'detects CSP lacking script-src/default-src');
+    assert.ok(ids.has('web-missing-frame-protection'), 'detects missing X-Frame-Options/frame-ancestors');
+    assert.ok(ids.has('web-missing-nosniff'), 'detects missing X-Content-Type-Options: nosniff');
+    assert.ok(ids.has('web-server-version-leak'), 'detects X-Powered-By header');
+    assert.ok(ids.has('web-cookie-no-samesite'), 'detects missing SameSite cookie attribute');
+    assert.ok(!ids.has('html-duplicate-id'), 'ignores data-id attributes');
+    assert.ok(!ids.has('web-target-blank-no-rel'), 'recognizes rel="noopener" before target="_blank"');
+    assert.ok(!ids.has('html-form-get'), 'skips search GET forms in bugsOnly mode');
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+  }
+});

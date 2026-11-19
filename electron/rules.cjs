@@ -1487,7 +1487,7 @@ const categoryRules = {
       'window.open(url, "_blank", "noopener,noreferrer");',
       'Pass "noopener,noreferrer" to prevent reverse-tabnabbing.'),
     html('web-target-blank-no-rel', 'Anchor target="_blank" without rel="noopener"', 'medium', 'CWE-1022',
-      /<a\b[^>]*target\s*=\s*["']_blank["'](?![^>]*rel\s*=\s*["'][^"']*noopener)/i,
+      /<a\b(?![^>]*\brel\s*=\s*["'][^"']*noopener)[^>]*\btarget\s*=\s*["']_blank["']/i,
       '<a href="https://external.example" target="_blank">Open</a>',
       '<a href="https://external.example" target="_blank" rel="noopener noreferrer">Open</a>',
       'Add rel="noopener noreferrer" on external _blank links.'),

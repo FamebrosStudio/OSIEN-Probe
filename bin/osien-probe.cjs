@@ -17,6 +17,7 @@ const {
   SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'],
 } = require('../electron/scanner.cjs');
 const { checkAiHealth } = require('../electron/ai-review.cjs');
+const { scanLiveUrl } = require('../electron/web-auditor.cjs');
 
 const C = {
   reset: '\x1b[0m',
@@ -296,9 +297,14 @@ async function run() {
     return;
   }
 
-  const root = path.resolve(opts.target);
-  const result = await scanProjectRoot(root, opts.kind, { bugsOnly: opts.bugsOnly });
-  const projectMeta = { name: path.basename(root), root, kind: opts.kind };
+  const isLiveUrl = /^https?:\/\//i.test(opts.target);
+  const root = isLiveUrl ? opts.target : path.resolve(opts.target);
+  const result = isLiveUrl
+    ? await scanLiveUrl(root, { bugsOnly: opts.bugsOnly })
+    : await scanProjectRoot(root, opts.kind, { bugsOnly: opts.bugsOnly });
+  const filesScanned = result.filesScanned ?? result.scannedFiles ?? 0;
+  const rulesEvaluated = result.rulesEvaluated ?? result.totalChecks ?? 0;
+  const projectMeta = { name: isLiveUrl ? new URL(root).hostname : path.basename(root), root, kind: result.kind || opts.kind };
 
   let output = '';
   if (opts.format === 'sarif') {
@@ -310,10 +316,10 @@ async function run() {
   } else {
     const lines = [
       `OSIEN Probe v${pkg.version}`,
-      `Path:        ${root}`,
-      `Category:    ${opts.kind}`,
-      `Files:       ${result.filesScanned}`,
-      `Rule checks: ${result.rulesEvaluated.toLocaleString()}`,
+      `Path:        ${result.root || root}`,
+      `Category:    ${result.kind || opts.kind}`,
+      `Files:       ${filesScanned}`,
+      `Rule checks: ${rulesEvaluated.toLocaleString()}`,
       `Findings:    ${result.findings.length}${result.truncated ? ' (truncated at limit)' : ''}`,
       `Score:       ${result.score}/100`,
       `Duration:    ${result.durationMs}ms`,
